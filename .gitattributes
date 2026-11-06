@@ -1,0 +1,6 @@
+# 关闭行尾自动转换：配置同步侧按内容做指纹比对，checkout 改写行尾会导致误判冲突
+* -text
+
+# 二进制资产
+*.png binary
+*.ico binary
