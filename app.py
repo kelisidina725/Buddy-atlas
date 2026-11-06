@@ -1,4 +1,4 @@
-"""WorkBuddy 会话与配置同步工具 —— 入口。
+"""Buddy-atlas 会话与配置同步工具 —— 入口。
 
 会话：盘点只读，导入写三件套，需先退出客户端。
 配置：设置项 / 人格文件 / 技能包，三方比对，冲突需人工拍板。
@@ -182,6 +182,19 @@ def _run_selftest() -> int:
         from wbsync import memory_pack as _memory_pack
 
         lines.append(_memory_pack.selftest_line())
+
+        # 检查更新链路：只验模块和 TLS 上下文能不能建起来，不发请求。
+        # 打包时漏掉 libssl / libcrypto，这里会直接 FAILED，而不是等用户
+        # 点开「检查更新」那一刻才发现 exe 里根本没有 https 能力。
+        import http.client  # noqa: F401
+        import ssl as _ssl
+        import urllib.request as _urlreq
+
+        from wbsync import updater as _updater
+
+        _ssl.create_default_context()
+        _urlreq.Request(_updater.LATEST_API)
+        lines.append("updater: 检查更新链路就绪（未发起请求）")
 
         # 本机账号对齐（并集）与 settings.json 行为开关
         from wbsync import align as _align

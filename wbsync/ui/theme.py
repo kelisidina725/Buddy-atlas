@@ -224,6 +224,20 @@ QLabel#SideStatusOff {{
     font-size: 12px;
 }}
 
+/* 侧栏最下面的检查更新：和状态行同一层的浅字，不做成胶囊，免得看着像主导航 */
+QPushButton#SideUpdate {{
+    border: none;
+    background: transparent;
+    color: {SIDE_TEXT};
+    padding: 8px 4px;
+    font-size: 12px;
+    text-align: left;
+}}
+QPushButton#SideUpdate:hover {{
+    color: {SIDE_TEXT_HOVER};
+    text-decoration: underline;
+}}
+
 /* ---- 页头右侧：白底绿字状态胶囊 + 白字账号胶囊 ----
    两态都是「能压在绿色上」的浅色：运行中用白底绿字（最醒目），
    离线用半透明白底白字（弱一档但不消失）。 */

@@ -94,12 +94,15 @@ if not os.path.isfile(_icon_file):
 # ---------------------------------------------------------------- 排除清单
 
 # 标准库里用不到的部分
+# http / urllib.request / email / ssl 这一组不能排除：检查更新要用标准库
+# 发一次 HTTPS 请求。排掉之后源码运行正常，打包出的 exe 却会在点开
+# 「检查更新」那一刻 ImportError，而且平时完全看不出来。
 STDLIB_EXCLUDES = [
     "tkinter", "_tkinter", "turtle", "pydoc", "doctest", "unittest",
     "lib2to3", "distutils", "setuptools", "pip", "wheel", "pkg_resources",
     "xmlrpc", "pdb", "cProfile", "pstats", "profile", "timeit",
     "asyncio", "multiprocessing", "socketserver",
-    "http", "urllib.request", "email", "html", "imaplib", "smtplib",
+    "html", "imaplib", "smtplib",
     "ftplib", "telnetlib", "xml.dom", "xml.sax",
 ]
 # ★ `concurrent` **不能**排除：`wbsync/copysession.py` 用
@@ -147,7 +150,12 @@ a = Analysis(
         (os.path.join("wbsync", "assets", "appicon.png"), os.path.join("wbsync", "assets")),
         (os.path.join("wbsync", "assets", "appicon_32.png"), os.path.join("wbsync", "assets")),
     ],
-    hiddenimports=[],
+    hiddenimports=[
+        # 检查更新的入口是 main_window._open_update_dialog 里的延迟导入，
+        # 静态分析未必追得到；把这条链路和标准库 HTTPS 依赖显式钉住。
+        "wbsync.updater", "wbsync.ui.update_dialog",
+        "urllib.request", "http.client", "ssl", "email", "email.parser",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -165,9 +173,9 @@ a = Analysis(
 # 按文件名精确剔除的 DLL。每一条都有实测体积依据（见 spec 顶部说明）。
 DROP_FILENAMES = {
     "opengl32sw.dll",       # 5.3 MB，软件 OpenGL 兜底渲染器。纯 Widgets 程序不碰 OpenGL
-    "qt6network.dll",       # 1.7 MB，本工具不联网
-    "libcrypto-3.dll",      # 1.6 MB，只有 ssl 用得到
-    "libssl-3.dll",
+    "qt6network.dll",       # 1.7 MB，检查更新走 Python 标准库，不用 QtNetwork
+    # libcrypto-3-x64.dll / libssl-3-x64.dll 必须留在包里，https 证书校验靠它们。
+    # 64 位 Windows 上 PyInstaller 用的是带 -x64 的名字，这里不再按文件名剔除。
     "qt6svg.dll",           # 0.6 MB，不用 SVG 图标
     "qt6qml.dll",
     "qt6quick.dll",

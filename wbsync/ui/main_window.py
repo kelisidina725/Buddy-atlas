@@ -812,7 +812,21 @@ class MainWindow(QMainWindow):
         )
         self.lbl_client.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(self.lbl_client)
+
+        # 检查更新放在侧栏最下面：它是唯一会联网的动作，不该和六个
+        # 本机页签混在一起，也不该在启动时自动跑。点开才查一次。
+        self.btn_update = QPushButton("检查更新")
+        self.btn_update.setObjectName("SideUpdate")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.clicked.connect(self._open_update_dialog)
+        v.addWidget(self.btn_update)
         return bar
+
+    def _open_update_dialog(self) -> None:
+        from .update_dialog import UpdateDialog
+
+        dlg = UpdateDialog(self)
+        dlg.exec()
 
     def _go(self, key: int) -> None:
         # 离开会话页时退出多选模式，避免勾选框与状态残留在别的页面背后
