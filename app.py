@@ -217,6 +217,19 @@ def _run_selftest() -> int:
             f"{'样式就绪' if not _align_dialog.align_qss() else '样式缺失'}"
         )
 
+        # 后台线程类曾在整个发布版里漏掉：模块能导入、主窗口能起来、盘点也正常，
+        # 只有点下「导入同步包」那一刻才 NameError。按名字逐个验一次，
+        # 让这类漏发布在打包产物里就能被自检抓住。
+        from wbsync.ui import main_window as _mw
+
+        _need_workers = ("PlanWorker", "ImportWorker", "CloseClientWorker")
+        _missing_workers = [n for n in _need_workers if not hasattr(_mw, n)]
+        if _missing_workers:
+            raise RuntimeError(
+                f"main_window 缺少后台线程类：{', '.join(_missing_workers)}"
+            )
+        lines.append(f"ui workers: {len(_need_workers)} 个后台线程类齐全")
+
         # 同步包 v2 的解析链路（zipfile 双前缀 + 版式校验），
         # 用内存里造的最小包验证，不碰用户数据
         import json as _json

@@ -1,6 +1,18 @@
-# 关闭行尾自动转换：配置同步侧按内容做指纹比对，checkout 改写行尾会导致误判冲突
+# 关闭行尾自动转换（* -text）。
+#
+# 两个理由，都不是洁癖：
+#   1) 记忆文件是 AI 逐轮追加写的，一端 CRLF 一端 LF 会让每行都变成 diff，
+#      真正的语义改动被埋掉 —— handoff 的可读性直接归零。
+#   2) 配置同步侧靠 sha256(payload) 做三方比对（wbsync/config_items.py），
+#      行尾被 checkout 改写后两端指纹全部失配，工具会报「全部冲突」。
 * -text
 
-# 二进制资产
+# 二进制资产显式标注，避免被当文本做 diff / 合并
 *.png binary
 *.ico binary
+*.exe binary
+*.zip binary
+
+# 注意：-text 只禁止 git 做行尾转换，**不阻止编辑器重写行尾**。
+# 若某次提交出现整文件 diff，先用 `git diff --ignore-space-at-eol --stat` 判断
+# 是否纯行尾翻转（差异会塌成几行），再把 \r\n 归一为 \n 后提交。

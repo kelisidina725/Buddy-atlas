@@ -19,7 +19,7 @@ Windows 上的本地会话与配置管理工具。它读 WorkBuddy 客户端存�
 ![主窗口概览，左侧是六个页签](screenshots/01-overview.png)
 
 - Windows 10 / 11，这台机器装过并登录过 WorkBuddy 客户端。工具读的是客户端留下的本地数据，客户端没登录过时只能看到有限内容。
-- 到 [Releases 页面](https://github.com/kelisidina725/Buddy-atlas/releases/latest) 取 `Buddy-atlas-1.14.0.exe`，或者用这个[直接下载链接](https://github.com/kelisidina725/Buddy-atlas/releases/download/v1.14.0/Buddy-atlas-1.14.0.exe)。双击就能运行，不用装 Python。源码运行方式在文末。
+- 到 [Releases 页面](https://github.com/kelisidina725/Buddy-atlas/releases/latest) 取 `Buddy-atlas-1.14.1.exe`，或者用这个[直接下载链接](https://github.com/kelisidina725/Buddy-atlas/releases/download/v1.14.1/Buddy-atlas-1.14.1.exe)。双击就能运行，不用装 Python。源码运行方式在文末。
 - 首次打开落在「概览」。左栏六个页签：概览、账号、会话、配置、工作空间、备份与包。
 
 概览页是这台机器的统计和最近一次备份，导入导出的快捷入口也在这一页。账号页一张卡一个账号，显示昵称、积分快照的最近一次观察值、会话条数和最近使用时间；当前登录的账号有「当前账号」标记，其它账号可以点「切换账号」。点卡片空白处只是查看这个账号的数据，不改登录态，也不写任何东西。卡片右上角的「⋯」里有修改账号名、打开数据目录、本机账号对齐、添加账号。

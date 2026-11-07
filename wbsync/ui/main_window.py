@@ -519,6 +519,96 @@ class SwitchWorker(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class PlanWorker(QThread):
+    """读会话包并与本机比对，产出 (bundle, actions)。
+
+    与 align_dialog.PlanWorker 同名但不是一回事：那个算账号对齐计划，
+    这个打开的是 *.wbsync.zip 会话包（_import_bundle 入口）。
+    """
+
+    finished = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, path: str, parent=None) -> None:
+        super().__init__(parent)
+        self._path = path
+
+    def run(self) -> None:
+        try:
+            b = bundle_mod.read_bundle(self._path)
+            self.finished.emit(b, importer.plan_import(b))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ImportWorker(QThread):
+    """后台写会话。调用方负责先关客户端，execute_import 里还有一道铁律校验。"""
+
+    progressed = Signal(int, int)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        actions,
+        bundle,
+        dry_run: bool,
+        parent=None,
+        *,
+        cwd_remaps=None,
+        include_duplicates: bool = False,
+        allow_div_overwrite: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self._actions = actions
+        self._bundle = bundle
+        self._dry_run = dry_run
+        self._cwd_remaps = dict(cwd_remaps or {})
+        self._include_duplicates = include_duplicates
+        self._allow_div_overwrite = allow_div_overwrite
+
+    def run(self) -> None:
+        try:
+            rep = importer.execute_import(
+                self._actions,
+                self._bundle,
+                dry_run=self._dry_run,
+                cwd_remaps=self._cwd_remaps,
+                progress=lambda done, total: self.progressed.emit(done, total),
+                include_duplicates=self._include_duplicates,
+                allow_div_overwrite=self._allow_div_overwrite,
+            )
+            self.finished.emit(rep)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class CloseClientWorker(QThread):
+    """后台关客户端，把 CloseOutcome 交给各入口的 _on_closed* 回调。
+
+    parent 可选：四个调用点里有的传主窗口、有的不传，两种都合法 —— 线程
+    运行期间的生命周期由 self._closer 这个强引用兜住，不依赖 Qt 父子关系。
+    """
+
+    tick = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+
+    def run(self) -> None:
+        try:
+            outcome = closeflow.prepare_import(
+                progress=lambda used, left: self.tick.emit(
+                    f"等待 WorkBuddy 退出… {used:.0f}s（还有 {left} 个进程）"
+                )
+            )
+            self.finished.emit(outcome)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 def _chip(text: str) -> QPushButton:
     """筛选页签。选中态是深色胶囊（设计稿），不是绿胶囊 ——
     绿色在这套界面里表示「正常/通过」，用它表示「当前筛选」会误导。"""

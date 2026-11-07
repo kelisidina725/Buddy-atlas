@@ -1,19 +1,59 @@
-# Python
+# ===== Python 虚拟环境 =====
+# 不要依赖 venv 自带的 .gitignore，重建后会失效
+venv/
+.venv/
+env/
+
+# ===== Python 字节码与缓存 =====
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
-.venv/
-venv/
+.eggs/
+wheels/
 
-# 构建产物
+# ===== 测试与覆盖率 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# ===== 构建产物 =====
 build/
 dist/
+# 公开库不入库任何 exe 与备份；exe 只作为 GitHub Release 附件发布
 *.exe
+*.exe.old-*
+*.exe.bak
+*.bak
 
-# 编辑器与系统
+# ===== 第三方二进制工具（构建时按需获取，不入库）=====
+_tools/
+
+# ===== 项目私有数据 / AI 记忆 =====
+# 公开库口径：.workbuddy/ 整体忽略。记忆、日志、截图证据含本机绝对路径与个人信息，
+# 一律不入库；不要用 git add -f 强推。
+.workbuddy/
+
+# ===== 本地应急副本 =====
+.git-backup/
+# 重新拉起工程时留下的整份嵌套副本（自带 .git）
+/Buddy-atlas/
+
+# ===== 编辑器与系统 =====
 .vscode/
 .idea/
 *.swp
+*.swo
 *~
+
+# ===== Windows =====
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ===== macOS =====
 .DS_Store
