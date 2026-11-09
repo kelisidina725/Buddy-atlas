@@ -24,6 +24,14 @@ import os
 import re
 import sys
 
+# 产物输出目录：release/（不是 PyInstaller 默认的 dist/）。
+# PyInstaller 6 里 spec 内的 DISTPATH 只被注入、不会被回读，所以必须在命令行传：
+#     python -m PyInstaller wbsync.spec --noconfirm --distpath release
+# 为什么换目录：本机存在按「精确路径 + 文件身份」拦截
+# <项目>\dist\Buddy-atlas.exe 的机制（2026-11-10 实测：同字节改名或换目录均可
+# 正常运行，单独把别的 exe 放到该路径也正常），且加杀软白名单无效。
+# 生成到 release\ 下可绕开，发布脚本 .workbuddy/release_local.py 也按此路径取产物。
+
 block_cipher = None
 
 # ---------------------------------------------------------------- 版本资源

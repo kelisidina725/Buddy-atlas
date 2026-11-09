@@ -24,6 +24,7 @@ htmlcov/
 # ===== 构建产物 =====
 build/
 dist/
+release/
 # 公开库不入库任何 exe 与备份；exe 只作为 GitHub Release 附件发布
 *.exe
 *.exe.old-*
