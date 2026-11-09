@@ -1349,11 +1349,13 @@ class MainWindow(QMainWindow):
         if self._switch_dialog_open:
             return
         self._switch_dialog_open = True
-        current = self._current_uid
-        if current == ALL_ACCOUNTS or not current:
-            current = self._account_login_uid()
+        # 切换登录身份的源账号只认认证文件。_current_uid 是「正在查看谁」，
+        # 拿它当源会让查看中的账号从候选里消失、真正的登录账号反而出现在候选里，
+        # 弹窗的「当前登录」也会说错人（2026-11-09 用户实测复现）。
+        current = self._account_login_uid()
 
-        # 抽屉进来时已经指定了目标；其余入口留空，让用户自己选
+        # 账号卡进来时已经指定了目标；其余入口留空，让用户自己选。
+        # 登录账号那张卡的按钮是禁用态，理论上不会相等，留着挡一层兜底。
         if target_uid and target_uid == current:
             target_uid = ""
 

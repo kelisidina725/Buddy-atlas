@@ -116,10 +116,19 @@ class SwitchAccountDialog(QDialog):
         # 原来写死 580，三步里只有账号选择步最短，那一屏就空了一大截。
         self.resize(760, 520)
         self._build()
-        self._goto(0)
-        # 从抽屉进来时目标已经定了，替用户选中 —— 否则要在列表里再找一遍自己刚点的那个
+        # 从账号卡进来时目标已经定了，替用户选中（选中经 itemSelectionChanged
+        # 定下 _target_uid）—— 否则要在列表里再找一遍自己刚点的那个
         if self._preselect:
             self._preselect_row()
+        # 账号卡入口的语义是「就切到这个账号」：目标已定且凭据就绪时直达第 2 步，
+        # 第 1 步徽标显示为已完成，仍可「上一步」回去改目标；目标没凭据则停在
+        # 第 1 步并预选它，让「为什么不能切」摆在眼前，而不是走进必然失败的下一步。
+        start = (
+            1
+            if self._target_uid and self._store.get(self._target_uid) is not None
+            else 0
+        )
+        self._goto(start)
 
     def _chrome_height(self) -> int:
         """除了步骤内容之外，窗口还要占多高（标题 / 副标题 / 步骤条 / 底栏 + 间距）。

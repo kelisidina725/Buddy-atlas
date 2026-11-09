@@ -316,6 +316,32 @@ def _run_selftest() -> int:
             f"{'就绪' if pick_rows == 1 else '异常'}"
         )
 
+        # 切换向导的卡片入口回归探针（2026-11-09 实测缺陷）：
+        # 预选目标必须生效且不被清空；目标凭据就绪时应直达第 2 步「迁移内容」，
+        # 无凭据时停在第 1 步。只读 —— 对话框只收集意图，不执行任何写入。
+        from wbsync.ui.switch_dialog import SwitchAccountDialog as _SwitchDlg
+
+        _login = win._account_login_uid()
+        _others = [a for a in win._accounts if a.uid and a.uid != _login]
+        if _others:
+            _pick_uid = _others[0].uid
+            sw = _SwitchDlg(win._accounts, win._labels, _login,
+                            parent=win, preselect_uid=_pick_uid)
+            _cred_ok = sw._store.get(_pick_uid) is not None
+            _expect_step = 1 if _cred_ok else 0
+            _direct_ok = sw.target_uid == _pick_uid and sw._step == _expect_step
+            sw.close()
+            if not _direct_ok:
+                raise RuntimeError(
+                    f"切换向导卡片入口异常：target={sw.target_uid!r} "
+                    f"step={sw._step}（期望 target={_pick_uid!r} step={_expect_step}）"
+                )
+            lines.append(
+                f"ui: 切换向导卡片入口直达第 {sw._step + 1} 步，目标预选生效"
+            )
+        else:
+            lines.append("ui: 切换向导探针跳过（本机只有一个账号）")
+
         win.close()
         cfg.close()
     except Exception:
