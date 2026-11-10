@@ -142,7 +142,9 @@ def fetch_latest(timeout: float = 10.0) -> ReleaseInfo:
         page_url=str(data.get("html_url") or RELEASES_PAGE),
         notes=str(data.get("body") or ""),
         published_at=str(data.get("published_at") or ""),
-        asset_name=str(exe.get("name") or f"Buddy-atlas-{tag.lstrip('v') or 'latest'}.exe"),
+        # 附件名固定为 Buddy-atlas.exe（版本由 tag 标识）。这里只是 Release
+        # 没有 exe 附件时的兜底名，供保存对话框预填，不再拼版本号。
+        asset_name=str(exe.get("name") or "Buddy-atlas.exe"),
         asset_url=str(exe.get("browser_download_url") or ""),
         asset_size=int(exe.get("size") or 0),
         asset_digest=str(exe.get("digest") or ""),
