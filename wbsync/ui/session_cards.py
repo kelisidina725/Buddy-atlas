@@ -1,4 +1,4 @@
-"""会话列表 —— 按「对话 / 工作区 → 日期·空间 → 会话」三级分组的紧凑列表。
+"""会话列表 —— 对话区平铺会话，工作区按「空间 → 会话」分组的紧凑列表。
 
 ## 为什么长成客户端那样
 
@@ -16,22 +16,25 @@
 标题被压到只剩半句时，比对就没法做了。放第二行既保住宽度，
 又让第一行与客户端严丝合缝。
 
-## 为什么是三级而不是两级
+## 为什么对话是两级、工作区是三级
 
-客户端左栏分「对话」和「工作区」两个区。对话区的二级是**日期/时间戳目录**
-（`2026-11-02-14-14-08`），工作区区的二级是**空间名**。第一版把这两层压成
-一层，结果 40 条不同日期的对话被合并成一个 `demo/WorkBuddy` 分组，
-分组名既不说明是哪天、也点不开 —— 2026-11-03 反馈里最刺眼的那处。
+客户端左栏分「对话」和「工作区」两个区。工作区的二级是**空间名**，同一项目
+几十条会话能一键收起，这层要留。对话区原来的二级是**日期/时间戳目录**
+（`2026-11-02-14-14-08`），可它只是客户端给临时会话起的容器名：一条会话
+一个组、默认还收起，找会话得先点开一层才看得见标题。2026-11-11 起去掉
+这一层，对话区直接平铺会话名称，按最近活动倒序；行内第二行仍写相对时间，
+日期信息没有丢。
 
-分组之后空间名/日期从「每条重复一遍」变成「一组说一次」，标题宽度全还给正文；
-同一项目的几十条也能一键收起。组内与组间都按最近活动倒序 —— 和客户端一致。
+`spaces.group_sessions` 仍返回对话的日期分组 —— 对齐、逐条选择、同步计划、
+切换向导四个界面还在用。归组逻辑不动，只在**本列表**渲染时换成平铺，
+改动才不会扩散到那四个界面。
 
 ## 缩进是层级的一部分
 
-三级必须**逐级右移**：一级贴左、二级 +16、三级再 +16。若三级都对齐在 x=13，
-一眼看过去就是三排并列的列表，"谁属于谁"只能靠猜。缩进值见 INDENT_* 常量，
-二级的文字左缘与三级的标题左缘落在同一条竖线（30px）上 —— 分组名与它下面的
-会话是同一层的两件事，视觉上不能错位。
+工作区的三级必须**逐级右移**：一级贴左、二级 +16、三级再 +16。若三级都对齐
+在 x=13，一眼看过去就是三排并列的列表，"谁属于谁"只能靠猜。对话区的行虽然
+直接挂在一级下，仍沿用 INDENT_ROW —— 两个区的会话标题左缘要落在同一条竖线
+（30px）上，否则切来切去会显得错位。
 
 ## 选中态只改两行
 
@@ -212,7 +215,7 @@ class ElidedLabel(QLabel):
 class GroupHeader(QWidget):
     """分组标题：折叠三角 + 名字 + 条数。整条可点。
 
-    `level=0` 是一级（对话 / 工作区），`level=1` 是二级（日期 / 空间）。
+    `level=0` 是一级（对话 / 工作区），`level=1` 是二级（工作区的空间名）。
     两者只差缩进、字号与写法，交互完全一样 —— 一级也能收起整区。
 
     多选模式下右侧额外出现「全选本组」勾选框（三态：全选/半选/不选）。
@@ -239,7 +242,7 @@ class GroupHeader(QWidget):
         self.setFixedHeight(ROOT_HEIGHT if level == 0 else GROUP_HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # 一级写「对话 (6)」（客户端口径），二级写「2026-11-02 · 1 条」：
+        # 一级写「对话 (6)」（客户端口径），二级写「WS1 · 3 条」：
         # 括号留给固定分区，圆点留给容器，两种写法一眼能分出层级
         self._label = label
         self._text = f"{label} ({count})" if level == 0 else f"{label} · {count} 条"
@@ -306,7 +309,7 @@ class GroupHeader(QWidget):
 
 
 class SessionRow(QFrame):
-    """单条会话的列表行（第三级）：标题 + 行尾体积，第二行时间。
+    """单条会话的列表行（对话区第二级 / 工作区第三级）：标题 + 体积，第二行时间。
 
     多选模式下行首出现勾选框，点击整行即勾选（不再送进详情面板）。
     `indent` 是三级缩进，由列表按层级注入。
@@ -360,7 +363,7 @@ class SessionRow(QFrame):
         self._title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         text.addWidget(self._title)
 
-        # ---- 第二行：时间（空间名/日期已经在分组层级里说过一遍，行内不再重复）
+        # ---- 第二行：相对时间（与客户端左栏写法一致，行内不重复空间名/日期）
         self._time_full = fmt_when(self.record.last_activity_at or self.record.updated_at)
         self._meta_text = self._time_full
         self._meta = QLabel(self._meta_text)
@@ -445,11 +448,12 @@ class SessionRow(QFrame):
 
 
 class SessionList(QScrollArea):
-    """三级分组的会话列表：对话/工作区 → 日期/空间 → 会话。
+    """会话列表：对话区平铺会话，工作区按「空间 → 会话」分组。
 
     节点键（写进折叠偏好文件，必须稳定）：
     - 一级：`对话` / `工作区`
-    - 二级：`对话|<时间戳目录或日期>` / `工作区|<小写空间路径>`
+    - 二级：`工作区|<小写空间路径>`
+    - 旧偏好里的 `对话|<时间戳目录或日期>` 已无对应节点，加载后自然被忽略。
     """
 
     selection_changed = Signal(object)      # SessionRecord | None
@@ -499,7 +503,7 @@ class SessionList(QScrollArea):
         """注入折叠偏好。
 
         一级默认**展开**、二级默认**收起**（"展开到二级"）：二级是几十个
-        日期/空间，全开就是铺满标题的墙；全收又什么都看不见。存「收起的」与
+        空间，全开就是铺满标题的墙；全收又什么都看不见。存「收起的」与
         「展开过的」两套名单才分得清「用户展开过」和「从没碰过」。
         """
         self._collapsed = set(collapsed or ())
@@ -523,13 +527,10 @@ class SessionList(QScrollArea):
 
         grouped = spaces.group_sessions(records)
 
-        if grouped.chat_groups:
-            self._build_root(
-                self.ROOT_CHAT,
-                len(grouped.chats),
-                grouped.chat_groups,
-                "对话区的二级是 WorkBuddy 自动建的时间戳目录（没有目录时按活动日期）",
-            )
+        # 对话区不铺日期二级：grouped.chat_groups 仍供四个向导使用，本列表只取
+        # 平铺的 chats，直接挂到一级节点下；工作区照旧按空间分组。
+        if grouped.chats:
+            self._build_chat_root(self.ROOT_CHAT, len(grouped.chats), grouped.chats)
         if grouped.spaces:
             self._build_root(
                 self.ROOT_SPACE,
@@ -555,8 +556,23 @@ class SessionList(QScrollArea):
         for row in self._cards:
             row.set_check_visible(self._selmode)
 
+    def _build_chat_root(self, key: str, count: int, chats) -> None:
+        """对话区：一级下面直接列会话，不插日期/时间戳二级节点。
+
+        日期目录名只是客户端给临时会话起的容器名，一条会话一个组还得逐组点开，
+        找会话时反而是障碍。行直接挂在一级键下即可：折叠、全选、选中都靠节点键
+        递归，平铺不需要另写一套逻辑。排序按最近活动，与客户端左栏口径一致。
+        """
+        self._add_header(
+            key, key, count, level=0, parent_key="",
+            tip="对话区按最近活动倒序直接列出会话",
+        )
+        self._roots.append(key)
+        for record in sorted(chats, key=spaces._activity, reverse=True):
+            self._add_row(record, key)
+
     def _build_root(self, key: str, count: int, groups, tip: str) -> None:
-        """铺一级（对话 / 工作区）及其下所有二级节点与会话行。"""
+        """铺一级（工作区）及其下所有空间分组与会话行。"""
         self._add_header(key, key, count, level=0, parent_key="", tip=tip)
         self._roots.append(key)
         for group in groups:
@@ -714,7 +730,7 @@ class SessionList(QScrollArea):
 
     @property
     def group_count(self) -> int:
-        """二级分组个数（日期 + 空间）。"""
+        """二级分组个数（工作区空间；对话区已平铺）。"""
         return sum(1 for head in self._headers.values() if head.level == 1)
 
     def node(self, key: str) -> GroupHeader | None:
