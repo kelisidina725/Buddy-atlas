@@ -1,4 +1,4 @@
-"""「导入完成后重启 WorkBuddy，并进入该账号」—— 勾选项的统一文案与可用性。
+"""「完成后重启 WorkBuddy，并进入该账号」—— 勾选项的统一文案与可用性。
 
 ## 为什么文案必须点名账号
 
@@ -14,6 +14,10 @@
 没有本机登录账号 ⇒ 导入的会话保留源账号归属 ⇒ 本机客户端看不到它们。
 这种状态下「重启」点下去什么也不会发生，禁用比让人点完再困惑要好。
 宁可少一个选项，也不要给一个空承诺。
+
+## action 参数
+
+导入、删除、恢复共用这套文案与判据；action 只换动词，默认「导入」保持旧调用不变。
 """
 from __future__ import annotations
 
@@ -34,20 +38,46 @@ TARGET_TIP = (
 )
 
 
-def target_text(labels: "accounts.AccountLabels", uid: str) -> str:
-    return f"导入完成后重启 WorkBuddy，并进入「{labels.display(uid)}」"
+def no_account_text(action: str = "导入") -> str:
+    return NO_ACCOUNT_TEXT if action == "导入" else f"{action}完成后自动重启 WorkBuddy"
 
 
-def option_for(labels: "accounts.AccountLabels", uid: str) -> tuple[str, str, bool, bool]:
+def no_account_tip(action: str = "导入") -> str:
+    if action == "导入":
+        return NO_ACCOUNT_TIP
+    return (
+        "未能识别本机登录账号：无法确定重启后进入哪个账号。\n"
+        "建议取消勾选，稍后手动启动 WorkBuddy 确认结果。"
+    )
+
+
+def target_text(labels: "accounts.AccountLabels", uid: str, action: str = "导入") -> str:
+    return f"{action}完成后重启 WorkBuddy，并进入「{labels.display(uid)}」"
+
+
+def target_tip(action: str = "导入") -> str:
+    if action == "导入":
+        return TARGET_TIP
+    return (
+        f"重启后客户端会重建侧边栏快照，本次{action}的结果才会直接可见。\n"
+        "注意：客户端不支持由外部切换登录账号，重启只会回到当前登录的这个账号。"
+    )
+
+
+def option_for(
+    labels: "accounts.AccountLabels", uid: str, action: str = "导入"
+) -> tuple[str, str, bool, bool]:
     """纯决策：(文案, tooltip, 可用, 默认勾选)。与 Qt 无关，便于直接单测。"""
     if uid:
-        return target_text(labels, uid), TARGET_TIP, True, True
-    return NO_ACCOUNT_TEXT, NO_ACCOUNT_TIP, False, False
+        return target_text(labels, uid, action), target_tip(action), True, True
+    return no_account_text(action), no_account_tip(action), False, False
 
 
-def apply(chk: QCheckBox, labels: "accounts.AccountLabels", uid: str) -> bool:
+def apply(
+    chk: QCheckBox, labels: "accounts.AccountLabels", uid: str, action: str = "导入"
+) -> bool:
     """把文案、勾选态、可用性一次性写到勾选项上；返回是否可用。"""
-    text, tip, enabled, checked = option_for(labels, uid)
+    text, tip, enabled, checked = option_for(labels, uid, action)
     chk.setText(text)
     chk.setToolTip(tip)
     chk.setEnabled(enabled)

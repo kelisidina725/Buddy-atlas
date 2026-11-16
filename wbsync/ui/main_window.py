@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -90,6 +91,7 @@ from .merge_dialog import MergeDialog
 from .purge_dialog import PurgeDialog
 from .switch_dialog import SwitchAccountDialog
 from . import icons
+from . import restart_option
 from .session_cards import CardGrid, ElidedLabel, fmt_size, fmt_when_exact, space_label
 from .workspace_page import WorkspacePage
 from .flow_layout import FlowBox, ResponsiveBar
@@ -716,6 +718,9 @@ class MainWindow(QMainWindow):
         self._sync_config_report = None
         self._client_exe = ""
         self._auto_restart = False
+        # 删除 / 恢复确认框里用户勾选的重启意愿；关窗回调用它与 exe 路径共同决定
+        self._purge_auto_restart = True
+        self._restore_auto_restart = True
         # 会话页副标题（顶栏显示）：由 _update_summary 维护，切页时复用
         self._sess_sub = ""
         # 「让所有账号共用同一份数据」：只记意愿，不自动写库
@@ -2224,8 +2229,10 @@ class MainWindow(QMainWindow):
         self._pending_hide = list(cloud)
 
         if winproc.is_running():
-            if not self._confirm_close(True, action="删除"):
+            ok, restart = self._confirm_close_with_restart("删除")
+            if not ok:
                 return
+            self._purge_auto_restart = restart
             self._pending_purge = plan
             self._set_busy(True)
             self.overlay.start("正在关闭 WorkBuddy…")
@@ -2256,7 +2263,7 @@ class MainWindow(QMainWindow):
         if plan is None:
             return
         self._client_exe = getattr(outcome, "exe_path", "") or ""
-        self._auto_restart = bool(self._client_exe)
+        self._auto_restart = self._purge_auto_restart and bool(self._client_exe)
         self._do_purge(plan)
 
     def _do_purge(self, plan) -> None:
@@ -2320,7 +2327,10 @@ class MainWindow(QMainWindow):
         if restarted:
             lines.append("WorkBuddy 已重新启动。")
         elif not rep.failed:
-            lines.append("请启动 WorkBuddy 后确认侧边栏状态。")
+            if not self._auto_restart and self._client_exe:
+                lines.append("本次未勾选「删除完成后重启 WorkBuddy」—— 请手动启动 WorkBuddy，删除结果才会生效。")
+            else:
+                lines.append("请启动 WorkBuddy 后确认侧边栏状态。")
 
         QMessageBox.information(self, "物理删除完成", "\n".join(lines))
         self._refresh()
@@ -2480,6 +2490,7 @@ class MainWindow(QMainWindow):
             return
 
         running = winproc.is_running()
+        chk = None
         box = QMessageBox(self)
         box.setWindowTitle("恢复会话")
         box.setText(f"恢复「{record.title or '(未命名会话)'}」？")
@@ -2489,7 +2500,12 @@ class MainWindow(QMainWindow):
         ]
         if running:
             body.append("WorkBuddy 正在运行，恢复前必须先关掉它（写库会损坏全部会话）。")
+            body.append("恢复完成后是否自动重启 WorkBuddy 由下方勾选项决定。")
         box.setInformativeText("\n".join(f"· {b}" for b in body))
+        if running:
+            chk = QCheckBox(box)
+            restart_option.apply(chk, self._labels, self._labels.primary_uid, "恢复")
+            box.setCheckBox(chk)
         b_yes = box.addButton(
             "关闭并恢复" if running else "恢复", QMessageBox.ButtonRole.AcceptRole
         )
@@ -2505,6 +2521,7 @@ class MainWindow(QMainWindow):
             self._do_restore(plan)
             return
 
+        self._restore_auto_restart = chk.isChecked() if chk is not None else False
         self._pending_restore = plan
         self._set_busy(True)
         self.overlay.start("正在关闭 WorkBuddy…")
@@ -2529,7 +2546,7 @@ class MainWindow(QMainWindow):
         if plan is None:
             return
         self._client_exe = getattr(outcome, "exe_path", "") or ""
-        self._auto_restart = bool(self._client_exe)
+        self._auto_restart = self._restore_auto_restart and bool(self._client_exe)
         self._do_restore(plan)
 
     def _do_restore(self, plan) -> None:
@@ -2560,6 +2577,9 @@ class MainWindow(QMainWindow):
         if restarted:
             lines.append("")
             lines.append("WorkBuddy 已重新启动。")
+        elif not self._auto_restart and self._client_exe:
+            lines.append("")
+            lines.append("本次未勾选「恢复完成后重启 WorkBuddy」—— 请手动启动 WorkBuddy，恢复的会话才会出现在侧边栏。")
 
         QMessageBox.information(self, "恢复完成", "\n".join(lines))
         self._refresh()
@@ -3094,6 +3114,30 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(b_yes)
         box.exec()
         return box.clickedButton() is b_yes
+
+    def _confirm_close_with_restart(self, action: str) -> tuple[bool, bool]:
+        """破坏性操作的关窗确认 + 可取消的重启勾选项；返回 (是否确认, 是否重启)。
+
+        导入 / 同步的勾选在方案页完成，不经过这里。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("需要先关闭 WorkBuddy")
+        box.setText(f"{action}会话数据前必须关闭 WorkBuddy。")
+        box.setInformativeText(
+            "关闭会导致：\n"
+            "· 未发送的消息输入丢失\n"
+            "· 正在进行的对话中断（包括当前这个对话）\n"
+            "· 后台任务被中断\n\n"
+            "关闭后是否自动重启 WorkBuddy 由下方勾选项决定。"
+        )
+        chk = QCheckBox(box)
+        restart_option.apply(chk, self._labels, self._labels.primary_uid, action)
+        box.setCheckBox(chk)
+        b_yes = box.addButton(f"关闭并{action}", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_yes)
+        box.exec()
+        return box.clickedButton() is b_yes, chk.isChecked()
 
     def _run_import(
         self,
