@@ -50,7 +50,7 @@ from . import accounts
 from . import bundle as bundle_mod
 from . import copysession, dbcopy, fpcache
 from . import guard, importlog, paths
-from . import rehome
+from . import rehome, spacelink
 from .fingerprint import (
     BEHIND,
     DIVERGED,
@@ -1326,6 +1326,11 @@ def _write_sessions_db(
         if not cols:
             raise RuntimeError("sessions 表不存在，客户端结构可能已变更")
 
+        # 空间引用本机化：源机的 space_id 在本机多半不存在（只搬 sessions 表），
+        # 客户端挂不上分组就不显示（实测 12 条悬空只渲染了 4 条）。
+        # 这里按 cwd 换成本机同名空间，找不到就置 NULL 让客户端按 cwd 兜底。
+        space_index = spacelink.load(conn)
+
         for a in done:
             s = a.session
             if a.add_like:
@@ -1350,6 +1355,8 @@ def _write_sessions_db(
                     same = _cwd_spelling_of(cwd_spellings, str(row.get("cwd") or ""))
                     if same:
                         row["cwd"] = same
+                # cwd 定稿之后才算空间归属：换了落点，对应的空间也可能换
+                spacelink.localize_row(row, space_index, local_uid)
                 row = {k: v for k, v in row.items() if k in cols}
                 cols_sql = ", ".join(f'"{k}"' for k in row)
                 marks = ", ".join("?" for _ in row)
@@ -1374,6 +1381,7 @@ def _write_sessions_db(
                 if cur is None:
                     # 有正文却没索引 —— 补一条，否则界面里看不到
                     row = _require_row(s.row, s.cid, local_uid)
+                    spacelink.localize_row(row, space_index, local_uid)
                     row = {k: v for k, v in row.items() if k in cols}
                     cols_sql = ", ".join(f'"{k}"' for k in row)
                     marks = ", ".join("?" for _ in row)
@@ -1438,6 +1446,7 @@ def _write_sessions_db(
                         # 只有正文没有索引（客户端删行时漏了清理），补一条完整的
                         row = _require_row(s.row, s.cid, local_uid)
                         row.pop("deleted_at", None)
+                        spacelink.localize_row(row, space_index, local_uid)
                         row = {k: v for k, v in row.items() if k in cols}
                         cols_sql = ", ".join(f'"{k}"' for k in row)
                         marks = ", ".join("?" for _ in row)

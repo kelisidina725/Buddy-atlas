@@ -9,7 +9,15 @@
 
 旧版是上下两张表（待修 / 已记录），同一件事被拆成两半：上面空了用户就问
 「我上次设的映射呢」。设计稿把它们合成一张清单，用两段分组带隔开：
-「需要修复」在上，「已记录的映射」在下，同一列位置、同一套读法。
+同一列位置、同一套读法。
+
+## 为什么「已记录的映射」排在上面（v1.15.2）
+
+待修清单是**这轮要干的活**，映射是**自己攒下来的资产**：把资产压在手底下，
+用户只能看到一屏待修项，想删掉一条记错的落点时根本找不到入口
+（旧版还把「源路径正好是待修项」的那些映射整条藏起来，等于删不掉）。
+所以顺序反过来：先给可管理的映射，再给要修的路径；两边重叠的路径同时出现在
+两段里 —— 那不是重复，而是在说「这条我记过，但它现在还对不上」。
 
 ## 为什么新路径是可以编辑的输入框
 
@@ -177,6 +185,7 @@ class WorkspacePage(HeadedPage):
         # 这行先说「这件事是干什么的」，再说操作前提
         self.lbl_foot = QLabel(
             "路径对不上时，会话就找不到内容；「修复」会按文件夹名在本机重新匹配。"
+            "「删除」只清掉自动带出的记忆，不动会话。"
         )
         self.lbl_foot.setObjectName("HintLabel")
         foot.addWidget(self.lbl_foot, 1)
@@ -197,16 +206,17 @@ class WorkspacePage(HeadedPage):
         self.table.clearSpans()
         self.table.setRowCount(total_rows + bands)
 
+        # 映射段在前：它是可管理的资产，待修项是这轮的活
         r = 0
+        if self._mappings:
+            r = self._band(r, self._mapping_band_text())
+            for src, entry in self._mappings:
+                self._mapping_row(r, src, entry)
+                r += 1
         if self._issues:
             r = self._band(r, f"需要修复 · {len(self._issues)} 个")
             for issue in self._issues:
                 self._issue_row(r, issue)
-                r += 1
-        if self._mappings:
-            r = self._band(r, f"已记录的映射 · {len(self._mappings)} 条")
-            for src, entry in self._mappings:
-                self._mapping_row(r, src, entry)
                 r += 1
         self.table.setRowCount(r)
         # 空表说话：行数归零时由 paintEvent 补一句提示，有内容时自然不画
@@ -214,12 +224,14 @@ class WorkspacePage(HeadedPage):
 
         n_issue = len(self._issues)
         n_map = len(self._mappings)
+        n_path = len(self._paths())
         sess = sum(i.session_count for i in self._issues)
+        stale = self._stale_map_count()
         if n_issue:
-            self._set_sub(f"{n_issue + n_map} 个路径映射 · {n_issue} 个对不上，需要修复")
+            self._set_sub(f"{n_path} 个路径映射 · {n_issue} 个对不上，需要修复")
             self.lbl_summary.setText(
-                f"共 {n_issue + n_map} 个路径映射 · {n_issue} 个对不上，需要修复"
-                f"（涉及 {sess} 条会话）"
+                f"共 {n_path} 个路径映射（已记录 {n_map} 条）"
+                f" · {n_issue} 个对不上，需要修复（涉及 {sess} 条会话）"
             )
         elif n_map:
             self._set_sub(f"{n_map} 条映射已记录 · 所有会话的路径在本机都存在")
@@ -230,7 +242,32 @@ class WorkspacePage(HeadedPage):
 
         self.btn_fix.setEnabled(n_issue > 0)
         self.btn_fix.setText(f"修复全部 {n_issue} 个" if n_issue else "修复全部")
-        self.lbl_state.setText(f"共 {n_issue + n_map} 个映射" if (n_issue or n_map) else "")
+        state = []
+        if n_map:
+            state.append(f"已记录 {n_map} 条")
+            if stale:
+                state.append(f"其中 {stale} 条待修复")
+        if n_path:
+            state.append(f"共 {n_path} 个映射")
+        self.lbl_state.setText(" · ".join(state))
+
+    def _paths(self) -> set[str]:
+        """路径总数（映射与待修按源路径去重，避免同一路径被算两次）。"""
+        keys = {i.cwd for i in self._issues}
+        keys.update(src for src, _entry in self._mappings)
+        return keys
+
+    def _stale_map_count(self) -> int:
+        """记过、但这条路径现在仍然对不上的映射条数。"""
+        shaky = {i.cwd for i in self._issues}
+        return sum(1 for src, _entry in self._mappings if src in shaky)
+
+    def _mapping_band_text(self) -> str:
+        stale = self._stale_map_count()
+        text = f"已记录的映射 · {len(self._mappings)} 条"
+        if stale:
+            text += f"（其中 {stale} 条仍对不上，见下段）"
+        return text
 
     def _band(self, row: int, text: str) -> int:
         band = QTableWidgetItem(text)
@@ -287,7 +324,10 @@ class WorkspacePage(HeadedPage):
     def _mapping_row(self, row: int, src: str, entry: dict) -> None:
         self.table.setRowHeight(row, 44)
         old = QTableWidgetItem(src)
-        old.setToolTip(src)
+        old.setToolTip(
+            f"{src}\n记为：{entry.get('target', '')}\n"
+            "删掉后这条路径会重新按经验推测落点，已修好的会话不受影响。"
+        )
         old.setForeground(QColor(TEXT_SECONDARY))
         self.table.setItem(row, C_OLD, old)
         target = QTableWidgetItem(entry.get("target", ""))
@@ -298,10 +338,10 @@ class WorkspacePage(HeadedPage):
         when.setForeground(QColor(TEXT_TERTIARY))
         self.table.setItem(row, C_WHEN, when)
 
-        btn = QPushButton("忘记")
-        btn.setObjectName("LinkMuted")
+        btn = QPushButton("删除")
+        btn.setObjectName("LinkDanger")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip("从本地记忆里删掉这条映射（不影响会话数据）")
+        btn.setToolTip("从本地记忆里删掉这条映射（只删记忆，不动会话数据）")
         btn.clicked.connect(lambda _c=False, s=src: self._forget(s))
         holder = QWidget()
         hl = QHBoxLayout(holder)
@@ -312,16 +352,35 @@ class WorkspacePage(HeadedPage):
         self.table.setCellWidget(row, C_OP, holder)
 
     def _load_mappings(self) -> None:
-        """把 cwd_map 里记着的映射反显出来（排除上面已经列成待修的那些）。"""
+        """把 cwd_map 里记着的映射全部反显出来，按最近更新排前面。
+
+        ★ 不再排除「源路径正好也是待修项」的条目：排除之后那些映射在界面上
+          只显示成一个「记忆」小标签，删都删不掉。现在两段都列，
+          待修项多一个可见的落点可参考，映射多一条可删入口。
+        """
         entries = cwd_map.load_map()
-        shown = {i.cwd for i in self._issues}
-        rows = [(k, v) for k, v in entries.items() if k not in shown]
-        rows.sort(key=lambda kv: kv[1].get("updated_at", 0), reverse=True)
+        rows = list(entries.items())
+        rows.sort(key=lambda kv: (-int(kv[1].get("updated_at", 0) or 0), kv[0]))
         self._mappings = rows
 
     def _forget(self, source_cwd: str) -> None:
-        cwd_map.forget(source_cwd)
-        self.reload()
+        ans = QMessageBox.question(
+            self,
+            "删除映射",
+            f"从本地记忆里删掉这条映射？\n\n{source_cwd}\n\n"
+            "只删「下次自动带出」的记忆，不动会话数据、不动本机目录；"
+            "已经修好的会话不会因此失效。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        if cwd_map.forget(source_cwd):
+            self.reload()
+        else:
+            QMessageBox.information(self, "删除映射", "这条映射已经不在记忆里了，列表已刷新。")
+            self.reload()
+
 
     # ---------------------------------------------------------- 目标
     def _target_for(self, issue: rehome.SpaceIssue) -> rehome.RehomeTarget | None:

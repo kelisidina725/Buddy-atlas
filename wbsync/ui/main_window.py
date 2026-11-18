@@ -70,7 +70,9 @@ from .. import (
     importer,
     inventory,
     memory_pack,
+    paths,
     rehome,
+    spacelink,
     winproc,
 )
 from .. import pack as pack_mod
@@ -225,7 +227,7 @@ _SCOPE_TIPS = {
     SCOPE_DELETED: "在客户端里被删除的（可恢复，也可彻底清除）",
     SCOPE_NO_BODY: "有元数据但找不到正文文件（三件套缺件）",
     SCOPE_UNMAPPED: "有正文但云端映射缺失，另一台机器看不到",
-    SCOPE_HIDDEN: "有正文、已注册云端，但客户端侧边栏里不显示",
+    SCOPE_HIDDEN: "有正文，但客户端侧边栏里不显示（空间悬空 ＝ 指向的空间本机不存在；未纳入 ＝ 客户端重写过快照却没收录）",
 }
 
 
@@ -292,6 +294,16 @@ def _needs_cloud(record) -> bool:
 
 def _unmapped_count(rows) -> int:
     return sum(1 for r in rows if _needs_cloud(r))
+
+
+def _dangling_count(rows) -> int:
+    """空间悬空：`space_id` 指向本机不存在的空间（跨机导入的副作用）。"""
+    return sum(1 for r in rows if not r.is_deleted and r.space_dangling)
+
+
+def _ignored_count(rows) -> int:
+    """导入过、客户端已重写侧边栏快照却没纳入 —— 客户端就是不认这批。"""
+    return sum(1 for r in rows if r.ignored_import)
 
 
 def _remember_memory_map(acts) -> None:
@@ -1098,6 +1110,15 @@ class MainWindow(QMainWindow):
         self.act_unhide = menu.addAction("显示已隐藏的会话")
         self.act_unhide.triggered.connect(self._unhide_all)
         self.act_unhide.setVisible(False)
+        # 跨机导入会连源机的 space_id 一起搬进来，本机没有那行空间 → 客户端挂不上分组。
+        # 这条是数据修复动作（要写库），所以只在确实有悬空项时出现，且必须先关客户端。
+        self.act_spacefix = menu.addAction("修复悬挂的空间引用")
+        self.act_spacefix.setToolTip(
+            "把指向本机不存在空间的会话，按目录改挂到本机同名空间；"
+            "匹配不到的置空，让客户端按目录自己归组"
+        )
+        self.act_spacefix.triggered.connect(self._fix_dangling_spaces)
+        self.act_spacefix.setVisible(False)
         menu.addSeparator()
         # 「未注册云端」是诊断过滤，不是档位：勾上后在当前档位里只看
         # 「活着、有正文、却没有云端映射」的那些 —— 它们换台机器就看不到了
@@ -1384,12 +1405,13 @@ class MainWindow(QMainWindow):
 
         # 重算一遍计划（勾选可能改过）。这一步要算指纹、比内容，可能要一两秒；
         # 不先出遮罩，用户看到的就是「对话框一关，界面僵住」。
-        self.overlay.start("正在准备切换…", "统计要迁移的会话与长期记忆")
+        self.overlay.start("正在准备切换…", "统计要迁移的会话、人格文件与长期记忆")
         QApplication.processEvents()
         try:
             plan = switch_mod.plan_switch(
                 target,
                 copy_cids=dlg.copy_cids(),
+                do_persona=dlg.do_persona,
                 do_memory=dlg.do_memory,
             )
         finally:
@@ -1937,10 +1959,21 @@ class MainWindow(QMainWindow):
         counts[SCOPE_ALL] = len(base)
         for r in base:
             counts[_scope_bucket(r)] += 1
+        # 「未在侧边栏」这档混着两种成因，鼠标悬停时说清楚各有多少条
+        hidden_bits = []
+        dangling = _dangling_count(base)
+        ignored = _ignored_count(base)
+        if dangling:
+            hidden_bits.append(f"空间悬空 {dangling}")
+        if ignored:
+            hidden_bits.append(f"客户端未纳入 {ignored}")
         for key, btn in self._chips.items():
             n = counts.get(key, 0)
             btn.setText(f"{_SCOPE_LABELS[key]} {n}")
-            btn.setToolTip(_SCOPE_TIPS.get(key, ""))
+            tip = _SCOPE_TIPS.get(key, "")
+            if key == SCOPE_HIDDEN and hidden_bits:
+                tip += "（" + " · ".join(hidden_bits) + "）"
+            btn.setToolTip(tip)
             # 诊断档 0 条时收起：一个点了什么都没有的页签只会挤掉搜索框。
             # 当前选中的那档无论如何都留着，否则选完就"消失"了。
             btn.setVisible(key in _ALWAYS_SHOWN_SCOPES or n > 0 or key == self._scope)
@@ -1966,6 +1999,13 @@ class MainWindow(QMainWindow):
                 act_u.blockSignals(True)
                 act_u.setChecked(self._only_unmapped)
                 act_u.blockSignals(False)
+        # 「修复悬挂的空间引用」：只有确实有悬空项时才出现（0 条时藏着）
+        act_fix = getattr(self, "act_spacefix", None)
+        if act_fix is not None:
+            act_fix.setText(
+                f"修复悬挂的空间引用（{dangling}）" if dangling else "修复悬挂的空间引用"
+            )
+            act_fix.setVisible(dangling > 0)
 
     def _update_summary(self, rows: list[inventory.SessionRecord]) -> None:
         inv = self._inv
@@ -1986,9 +2026,18 @@ class MainWindow(QMainWindow):
         in_bar_now = sum(1 for r in scoped if r.in_sidebar)
         pending_now = sum(1 for r in scoped if r.visible_by_default and not r.in_sidebar)
         dead_now = buckets[SCOPE_DELETED]
+        # 空间悬空：space_id 指向本机不存在的空间（跨机导入的副作用）。
+        # 这批客户端挂不上分组、通常不渲染，所以不计入「可见」——
+        # 但必须报出来，否则「盘点 52 / 可见 7」看起来像工具漏了 45 条。
+        dangling_now = _dangling_count(scoped)
+        ignored_now = _ignored_count(scoped)
         unmapped_now = _unmapped_count(scoped)
         all_size = sum(r.jsonl_size or 0 for r in scoped)
         sub_bits = [f"盘点 {len(scoped)} 条", f"可见 {visible_now}"]
+        if dangling_now:
+            sub_bits.append(f"空间悬空 {dangling_now}")
+        if ignored_now:
+            sub_bits.append(f"未纳入 {ignored_now}")
         if dead_now:
             sub_bits.append(f"已删除 {dead_now}")
         sub_bits.append(f"合计 {fmt_size(all_size)}")
@@ -2031,7 +2080,32 @@ class MainWindow(QMainWindow):
         tail_right = f"合计 {fmt_size(total_size)}　有正文 {with_body}"
         if unmapped_now:
             tail_right += f"　未注册云端 {unmapped_now}"
+        if pending_now:
+            # 刚导入、客户端还没写进侧边栏；这批仍按「可见」处理，必须让用户看到
+            tail_right += f"　待认领 {pending_now}"
+        if dangling_now:
+            # 光有会话、挂不上空间：客户端通常不渲染它（「未在侧边栏」档里能逐条看）
+            tail_right += f"　空间悬空 {dangling_now}"
+        if ignored_now:
+            # 导入过、客户端重写过快照却没纳入：客户端就是不认这批
+            tail_right += f"　未纳入 {ignored_now}"
         self.lbl_foot_right.setText(tail_right)
+        tips = []
+        if pending_now:
+            tips.append(
+                "待认领：本工具刚导入、客户端还没重写过侧边栏快照，重启客户端后会自动写进去"
+            )
+        if ignored_now:
+            tips.append(
+                f"另有 {ignored_now} 条导入项客户端已重写快照却没纳入（客户端不认），"
+                "在「未在侧边栏」档里"
+            )
+        if dangling_now:
+            tips.append(
+                "空间悬空：会话指向的空间在本机不存在（跨机导入带过来的旧 space_id），"
+                "客户端挂不上分组，多半不显示；这些条目在「未在侧边栏」档里"
+            )
+        self.lbl_foot_right.setToolTip("\n".join(tips))
 
         # 「库内」这个词只在真的盘了全库时才成立；只盘了当前账号却报库内条数，
         # 等于告诉用户一个本次没去数过的数字。
@@ -2040,7 +2114,11 @@ class MainWindow(QMainWindow):
         else:
             tail = f"库内 {inv.total} 条 · 当前账号 {visible_now} 条可见"
         if pending_now:
-            tail += f"（{in_bar_now} 已在侧边栏 / {pending_now} 待确认）"
+            tail += f"（{in_bar_now} 已在侧边栏 / {pending_now} 待认领）"
+        elif in_bar_now:
+            tail += f"（{in_bar_now} 在侧边栏）"
+        if dangling_now:
+            tail += f" · 空间悬空 {dangling_now}（客户端挂不上分组，多半不显示）"
         if dead_now:
             tail += f" · 已删除 {dead_now}"
         if unmapped_now:
@@ -2390,6 +2468,100 @@ class MainWindow(QMainWindow):
         self._hidden.clear()
         uistate.save_hidden(set())
         self._apply_filter()
+
+    # ============================================================ 空间引用修复
+    def _fix_dangling_spaces(self) -> None:
+        """把指向本机不存在空间的会话改挂到本机空间（或置空）。
+
+        跨机导入只搬 `sessions` 表，源机的 `space_id` 一起带了过来；本机没有那行
+        空间，客户端就挂不上分组 —— 实测 12 条悬空里客户端只渲染了 4 条。
+        这一步是**写库操作**，所以：先只读扫描 → 关客户端 → 备份 → 改 → 重盘。
+        """
+        db = paths.workbuddy_db_path()
+        try:
+            items, index = spacelink.plan(db)
+        except Exception as exc:  # noqa: BLE001 - 只读扫描失败如实报出，不猜
+            QMessageBox.warning(
+                self, "修复悬挂的空间引用", f"扫描会话库失败：{type(exc).__name__}: {exc}"
+            )
+            return
+        if index is None:
+            QMessageBox.information(
+                self,
+                "修复悬挂的空间引用",
+                "这个客户端版本没有「空间」表，无需修复。",
+            )
+            return
+        if not items:
+            QMessageBox.information(
+                self, "修复悬挂的空间引用", "没有悬挂的空间引用，会话库是干净的。"
+            )
+            return
+
+        remap = [i for i in items if i.why == spacelink.REMAP]
+        clear = [i for i in items if i.why != spacelink.REMAP]
+        head = f"共 {len(items)} 条会话指向本机不存在的空间。"
+        body = [
+            head,
+            "",
+            f"· {len(remap)} 条能按目录改挂到本机同名空间",
+            f"· {len(clear)} 条本机找不到对应目录，置空后由客户端按目录归组",
+            "",
+        ]
+        for it in items[:6]:
+            body.append(f"· {it.title[:24] or it.cid[:8]}　{it.action_label}")
+        if len(items) > 6:
+            body.append("· …")
+        body += [
+            "",
+            "改的是 sessions.space_id 这一列，正文与云端映射不动；写前整库备份。",
+            "必须先完全退出 WorkBuddy（客户端开着会把它内存里的值写回去）。",
+        ]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("修复悬挂的空间引用")
+        box.setText("要把这些会话重新挂到本机的空间上吗？")
+        box.setInformativeText("\n".join(body))
+        ok = box.addButton("修复", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(ok)
+        box.exec()
+        if box.clickedButton() is not ok:
+            return
+
+        procs = guard.running_client_processes()
+        if procs:
+            QMessageBox.information(
+                self,
+                "请先退出 WorkBuddy",
+                "这次修复要写会话库，需要先完全退出 WorkBuddy。\n"
+                f"（当前还在运行：{'、'.join(procs)}）\n\n退出后再点一次即可。",
+            )
+            return
+
+        try:
+            changed, backup = spacelink.repair(db, items)
+        except guard.ClientRunningError:
+            QMessageBox.information(
+                self, "请先退出 WorkBuddy", "WorkBuddy 正在运行，退出后再试一次。"
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "修复失败",
+                f"{type(exc).__name__}: {exc}\n\n会话库已按原样保留（或已从备份位置恢复）。",
+            )
+            return
+
+        tail = f"\n备份：{backup.root}" if backup is not None and backup.files else ""
+        QMessageBox.information(
+            self,
+            "修复完成",
+            f"已改写 {changed} 条会话的空间引用。{tail}\n\n"
+            "重启 WorkBuddy 后，这些会话会挂回对应的工作空间。",
+        )
+        self._rescan_current()
 
     # ============================================================ 批量删除
     def _toggle_select_mode(self) -> None:

@@ -183,6 +183,10 @@ def _run_selftest() -> int:
 
         lines.append(_memory_pack.selftest_line())
 
+        from wbsync import spacelink as _spacelink
+
+        lines.append(_spacelink.selftest_line())
+
         # 检查更新链路：只验模块和 TLS 上下文能不能建起来，不发请求。
         # 打包时漏掉 libssl / libcrypto，这里会直接 FAILED，而不是等用户
         # 点开「检查更新」那一刻才发现 exe 里根本没有 https 能力。

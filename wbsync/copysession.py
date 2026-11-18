@@ -43,7 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import dbcopy, guard, paths
+from . import dbcopy, guard, paths, spacelink
 from .fingerprint import lf_size
 
 LEDGER_NAME = "wbsync-copies.json"
@@ -645,6 +645,12 @@ def _insert_row(
         out_vals.append(value)
     if not out_cols:
         raise RuntimeError("sessions 表没有可用列")
+    # 空间引用本机化：复制过来的会话可能指着源账号/源机才有的空间，
+    # 目标账号里挂不上分组就等于复制了个看不见的会话
+    if "space_id" in out_cols:
+        row = dict(zip(out_cols, out_vals))
+        spacelink.localize_row(row, spacelink.load(conn), target_uid)
+        out_vals = [row[c] for c in out_cols]
     marks = ", ".join("?" for _ in out_cols)
     conn.execute(
         f'INSERT OR REPLACE INTO "sessions" ({", ".join(out_cols)}) VALUES ({marks})',

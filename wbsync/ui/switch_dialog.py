@@ -17,6 +17,13 @@
 用户说「同步数据后直接切过去」，那默认就该把会话带过去。但复制确实会
 在目标账号里造出一批新会话（正文按新 id 落盘），有人只想换身份、不想多一份，
 所以给一个明确的勾选项，默认开、可关。
+
+## 为什么有「补齐人格文件」而没有「同步设置项」
+
+人格文件按 `user-<uid>-personal` 分账号存放，切到新 uid 后目标账号读自己的目录，
+缺文件就是空人格 —— 这是真的会"丢"的东西，所以给勾选项。设置项、技能、界面偏好
+存在 `~/.workbuddy` 根下，本机一份共用；工作空间记忆跟项目目录走。这三类切号前后
+都是同一份，搬它无效，因此只在页脚写一句说明，不列成可勾选项。
 """
 from __future__ import annotations
 
@@ -41,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import accounts as accounts_mod
-from .. import copysession, memorymerge, spaces as spaces_mod, vault
+from .. import copysession, memorymerge, spaces as spaces_mod, switch as switch_mod, vault
 from . import icons, theme
 
 _STEPS = ("目标与来源", "迁移内容", "确认")
@@ -101,6 +108,10 @@ class SwitchAccountDialog(QDialog):
         self._store = vault.Vault.load(base)
         self._plan: copysession.CopyPlan | None = None
         self._target_uid = ""
+        self._persona_available = False
+        self._persona_init = False
+        self._persona_add: list[str] = []
+        self._persona_conflict: list[str] = []
         self._memory_available = False
         self._memory_init = False
         self._step = 0
@@ -419,6 +430,30 @@ class SwitchAccountDialog(QDialog):
         self.lbl_memory_note.setStyleSheet(f"color:{theme.TEXT_SECONDARY};font-size:12px;")
         self.lbl_memory_note.setContentsMargins(22, 0, 0, 0)
         v.addWidget(self.lbl_memory_note)
+
+        self.chk_persona = QCheckBox("补齐人格文件")
+        self.chk_persona.setStyleSheet("font-size:13px;")
+        self.chk_persona.setToolTip(
+            "把当前账号的人格文件（SOUL / IDENTITY / USER / BOOTSTRAP）补进目标账号。\n"
+            "目标已有的文件一律不覆盖，只补它缺失的那些。"
+        )
+        v.addWidget(self.chk_persona)
+        self.lbl_persona_note = QLabel()
+        self.lbl_persona_note.setWordWrap(True)
+        self.lbl_persona_note.setStyleSheet(f"color:{theme.TEXT_SECONDARY};font-size:12px;")
+        self.lbl_persona_note.setContentsMargins(22, 0, 0, 0)
+        v.addWidget(self.lbl_persona_note)
+
+        shared = QLabel(
+            "设置项、技能与界面偏好是这台电脑共用的一份，切换后仍是同一份；"
+            "工作空间记忆跟着项目目录走 —— 这些都不随账号迁移。"
+        )
+        shared.setWordWrap(True)
+        shared.setStyleSheet(
+            f"color:{theme.TEXT_TERTIARY};font-size:11px;"
+            f"background:{theme.BG_HOVER};border-radius:6px;padding:6px 8px;"
+        )
+        v.addWidget(shared)
         return page
 
     # ---- 第三步：确认
@@ -476,7 +511,33 @@ class SwitchAccountDialog(QDialog):
             + "。"
         )
         self._refresh_copy_count()
+        self._refresh_persona_note()
         self._refresh_memory_note()
+
+    def _refresh_persona_note(self) -> None:
+        self._persona_add, self._persona_conflict = switch_mod.preview_persona(
+            self._current_uid, self._target_uid, self._base
+        )
+        total = len(self._persona_add) + len(self._persona_conflict)
+        self._persona_available = total > 0
+        if not self._persona_available:
+            self.chk_persona.setEnabled(False)
+            self.chk_persona.setChecked(False)
+            self.lbl_persona_note.setText(
+                "源账号没有人格文件，或目标账号已全部齐备，无需补齐。"
+            )
+            return
+        self.chk_persona.setEnabled(True)
+        # 只在第一次可用时默认勾上：来回翻步骤不否定用户手动的取消
+        if not self._persona_init:
+            self._persona_init = True
+            self.chk_persona.setChecked(True)
+        note = f"目标账号缺 {len(self._persona_add)} 个，将补入"
+        if self._persona_conflict:
+            note += (
+                f"；另有 {len(self._persona_conflict)} 个目标已有且内容不同，不覆盖"
+            )
+        self.lbl_persona_note.setText(note + "。")
 
     def _fill_sessions(self, plan: copysession.CopyPlan, keep: set[str] | None = None) -> None:
         """按「对话 / 工作区 → 日期·空间 → 会话」铺树。
@@ -798,6 +859,13 @@ class SwitchAccountDialog(QDialog):
         else:
             lines.append("· 不合并长期记忆")
 
+        if self.chk_persona.isChecked() and self._persona_available:
+            lines.append(
+                f"· 补齐 {len(self._persona_add)} 个人格文件到目标账号（已有的不覆盖）"
+            )
+        else:
+            lines.append("· 不补齐人格文件")
+
         lines.append("· 备份认证文件与数据库到 wbsync-backup")
         lines.append(f"· 关闭 WorkBuddy，把登录身份写成「{name}」")
         lines.append("· 重新启动 WorkBuddy")
@@ -840,6 +908,10 @@ class SwitchAccountDialog(QDialog):
     @property
     def do_copy(self) -> bool:
         return self.chk_copy.isChecked()
+
+    @property
+    def do_persona(self) -> bool:
+        return self.chk_persona.isChecked() and self._persona_available
 
     @property
     def do_memory(self) -> bool:

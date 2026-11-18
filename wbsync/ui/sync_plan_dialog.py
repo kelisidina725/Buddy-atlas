@@ -12,6 +12,9 @@
 用户是靠「我那天在哪个目录干活」回忆的：对话区看日期（时间戳目录名），
 工作区看空间名，与客户端左栏逐行对得上。三级都带三态勾选，一级就是批量开关。
 
+记忆节沿用同一套分层（工作区 → 空间 → 文件，列名同为「标题 / 判定」）：
+两屏读法一致，用户不必在第四步重新学一遍这套树。
+
 ## 客户端前置条件的不对称
 
 会话必须零进程（SQLite 文件级替换），配置只是文本覆写、技术上不强制。
@@ -475,10 +478,16 @@ class SyncPlanDialog(QDialog):
         )
         v.addWidget(note)
 
+        # 与第一步（会话）同一套分层与列名：工作区（根）→ 空间 → 文件。
+        # 记忆没有「对话」那一支（它只挂在项目目录下），所以根节点只有工作区；
+        # 列名也从「工作空间 / 文件 · 动作」改成「标题 · 判定」，
+        # 两屏并排看时读法一致，不会以为是两个功能。
         tree = QTreeWidget()
         tree.setColumnCount(3)
-        tree.setHeaderLabels(["工作空间 / 文件", "动作", "目标路径（可改）"])
+        tree.setHeaderLabels(["标题", "判定", "目标路径（可改）"])
         tree.setRootIsDecorated(True)
+        tree.setUniformRowHeights(False)
+        tree.setAlternatingRowColors(False)
         tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
@@ -487,12 +496,20 @@ class SyncPlanDialog(QDialog):
         self._mem_items: dict[int, QTreeWidgetItem] = {}
         self._mem_edits: dict[str, QLineEdit] = {}
 
-        for ws, acts in self._memory_groups():
+        groups = self._memory_groups()
+        root = QTreeWidgetItem(
+            [f"工作区（{len(groups)} 个空间 · {len(self._memory)} 个文件）", "", ""]
+        )
+        self._mark_group(root)
+        root.setToolTip(0, "只收 <项目目录>/.workbuddy/memory/*.md")
+        tree.addTopLevelItem(root)
+
+        for ws, acts in groups:
             node = QTreeWidgetItem([f"{ws.label or ws.wid}（{len(acts)} 个文件）", "", ""])
             self._mark_group(node)
-            tree.addTopLevelItem(node)
-            root = acts[0].root if acts else ""
-            edit = QLineEdit(root)
+            node.setToolTip(0, ws.path or "（包内没有记录源路径）")
+            root.addChild(node)
+            edit = QLineEdit(acts[0].root if acts else "")
             edit.setToolTip("导入后写入这个项目目录下的 .workbuddy/memory/")
             edit.textChanged.connect(lambda _t: self._refresh_summary())
             self._mem_edits[ws.wid] = edit
@@ -511,6 +528,7 @@ class SyncPlanDialog(QDialog):
                 node.addChild(leaf)
                 self._mem_items[id(act)] = leaf
             node.setExpanded(True)
+        root.setExpanded(True)
 
         self._sync_groups(tree)
         tree.itemChanged.connect(lambda _i, _c: self._refresh_summary())
@@ -519,7 +537,11 @@ class SyncPlanDialog(QDialog):
         return page
 
     def _memory_groups(self) -> list[tuple[object, list]]:
-        """按工作空间归组记忆动作（保持出现顺序）。"""
+        """按工作空间归组记忆动作，排序与第一步的工作区一致。
+
+        第一步的空间节点是「条数从多到少、同条数按名字」，这里照抄：
+        两屏并排时同一个项目的相对位置不会跳来跳去。
+        """
         by_wid: dict[str, tuple[object, list]] = {}
         order: list[str] = []
         for a in self._memory:
@@ -528,7 +550,9 @@ class SyncPlanDialog(QDialog):
                 by_wid[wid] = (a.workspace, [])
                 order.append(wid)
             by_wid[wid][1].append(a)
-        return [by_wid[w] for w in order]
+        rows = [by_wid[w] for w in order]
+        rows.sort(key=lambda ws_acts: (-len(ws_acts[1]), ws_acts[0].label or ws_acts[0].wid))
+        return rows
 
     # ------------------------------------------------------------ 步骤
     def _ensure_pages(self) -> None:
@@ -963,7 +987,7 @@ _PANE_LEAD = {
     "sessions": "按「对话 / 工作区 → 日期·空间 → 会话」三级展开；勾一级等于勾它下面全部，勾一半显示为半选。",
     "remap": "源工作空间在本机不存在时才需要映射；不勾的条目会落到包里记录的路径。",
     "config": "逐项决定写不写；冲突项要先在右侧选处理方式，否则按「跳过（保持现状）」处理。",
-    "memory": "同一工作空间里可以只搬 MEMORY.md，不搬日期日志；目标路径可改。",
+    "memory": "按「工作区 → 空间 → 文件」三级展开；同一工作空间里可以只搬 MEMORY.md，不搬日期日志；目标路径可改。",
 }
 
 

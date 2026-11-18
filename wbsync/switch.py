@@ -20,9 +20,24 @@
     3. 关闭客户端    → 失败**中止**：认证文件是客户端启动时读、运行中也可能回写，
                         热写会让两边打架，结果不可预测
     4. 复制会话      → 有硬失败**中止**：数据没搬成却切了身份，用户会以为"什么都没有"
-    5. 合并记忆      → 失败只警告：记忆是锦上添花，不该阻断身份切换
-    6. 写认证文件    → 失败则回滚（把备份写回去）并重启，用户还是原来的账号
-    7. 拉起客户端    → 失败只报告：身份已经切好了，只是没自动开
+    5. 补齐人格      → 失败只警告：只补目标账号缺失的文件，已存在的一概不动
+    6. 合并记忆      → 失败只警告：记忆是锦上添花，不该阻断身份切换
+    7. 写认证文件    → 失败则回滚（把备份写回去）并重启，用户还是原来的账号
+    8. 拉起客户端    → 失败只报告：身份已经切好了，只是没自动开
+
+## 为什么人格文件要单列一步（而设置项不用）
+
+人格文件（SOUL / IDENTITY / USER / BOOTSTRAP）在 `user-<uid>-personal/` 下，
+**按账号隔离**：切到新 uid 后客户端读的是那个账号自己的目录，缺文件就是空人格。
+这是"切过去感觉设置没跟着走"的真正来源之一。
+
+设置项 / 技能 / 界面偏好则存在 `~/.workbuddy` 根下，是这台机器共用的一份，
+切换账号前后是同一份文件，搬它等于把文件写回它自己 —— 因此不列迁移项。
+工作空间记忆在 `<项目目录>/.workbuddy/memory/`，跟项目目录走，与账号无关，同样不列。
+
+人格补齐沿用账号对齐既有的"只补不覆盖"语义，并直接复用 `align.persona_dir_of`
+的定位逻辑（多账号机器上 `config_items.persona_dir()` 只返回第一个，会拿错人）。
+它只写入目标不存在的文件，天然不覆盖用户内容，因此无需备份。
 
 ## 与导入流程共用同一条铁律
 
@@ -31,10 +46,99 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import accounts, authfile, closeflow, copysession, memorymerge, vault
+from . import accounts, align, authfile, closeflow, config_items, copysession, memorymerge, vault
+
+
+@dataclass
+class PersonaReport:
+    """人格文件补齐结果。只补目标缺失的文件，不覆盖任何已存在的。"""
+
+    added: list[str] = field(default_factory=list)       # 实际补入的文件名
+    conflicts: list[str] = field(default_factory=list)   # 目标已有且内容不同，未覆盖
+    same: list[str] = field(default_factory=list)        # 两端一致，无需动作
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added)
+
+    def summary(self) -> str:
+        if not self.changed:
+            return "人格文件无需补齐"
+        parts = [f"补入 {len(self.added)} 个人格文件"]
+        if self.conflicts:
+            parts.append(f"{len(self.conflicts)} 个目标已有、未覆盖")
+        return "，".join(parts)
+
+
+def _persona_files(uid: str, base) -> dict[str, bytes]:
+    """读一个账号的人格文件。目录定位复用 align，避免取错账号。"""
+    d = align.persona_dir_of(uid, base)
+    out: dict[str, bytes] = {}
+    for name, _label in config_items.PERSONA_FILES:
+        p = d / name
+        if p.is_file():
+            try:
+                out[name] = p.read_bytes()
+            except OSError:
+                continue
+    return out
+
+
+def preview_persona(source_uid: str, target_uid: str, base) -> tuple[list[str], list[str]]:
+    """只读预览：返回 (待补文件名, 目标已有且不同)。"""
+    if not source_uid or not target_uid or source_uid == target_uid:
+        return [], []
+    src = _persona_files(source_uid, base)
+    if not src:
+        return [], []
+    dst = _persona_files(target_uid, base)
+    add = [name for name in src if name not in dst]
+    conflict = [name for name in src if name in dst and dst[name] != src[name]]
+    return add, conflict
+
+
+def execute_persona(source_uid: str, target_uid: str, base) -> PersonaReport:
+    """把源账号的人格文件补进目标账号：只补缺失，已存在的一概不覆盖。"""
+    report = PersonaReport()
+    if not source_uid or not target_uid or source_uid == target_uid:
+        report.warnings.append("源账号与目标账号相同，或缺少账号，未补人格文件")
+        return report
+    src = _persona_files(source_uid, base)
+    if not src:
+        report.warnings.append("源账号没有人格文件，跳过")
+        return report
+    dst = _persona_files(target_uid, base)
+    add = [name for name in src if name not in dst]
+    report.conflicts = [name for name in src if name in dst and dst[name] != src[name]]
+    report.same = [name for name in src if name in dst and dst[name] == src[name]]
+    if not add:
+        return report
+
+    dst_dir = align.persona_dir_of(target_uid, base)
+    try:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        report.warnings.append(f"创建目标人格目录失败（{exc.strerror or exc}），未补人格文件")
+        return report
+    for name in add:
+        target = dst_dir / name
+        # 再查一次：扫描到写入之间目标可能被客户端补上了，此时不覆盖
+        if target.exists():
+            report.warnings.append(f"{name} 在写入前已出现，跳过以免覆盖")
+            continue
+        try:
+            tmp = target.with_name(target.name + ".wbsync-tmp")
+            tmp.write_bytes(src[name])
+            os.replace(tmp, target)
+            report.added.append(name)
+        except OSError as exc:
+            report.warnings.append(f"补 {name} 失败：{exc.strerror or exc}")
+    return report
 
 
 @dataclass
@@ -47,6 +151,9 @@ class SwitchPlan:
     current_name: str = ""
     credential: vault.Credential | None = None
     copy_plan: copysession.CopyPlan | None = None
+    do_persona: bool = False
+    persona_add: list[str] = field(default_factory=list)       # 待补的人格文件名
+    persona_conflict: list[str] = field(default_factory=list)  # 目标已有且不同，不覆盖
     do_memory: bool = False
     memory_preview: memorymerge.MergeReport | None = None
     # 阻止执行的原因（空串 = 可以执行）
@@ -67,6 +174,8 @@ class SwitchPlan:
         out = [f"关闭 WorkBuddy（当前登录：{self.current_name or '未识别'}）"]
         if self.copy_plan is not None and self.copy_plan.copyable:
             out.append(f"复制 {len(self.copy_plan.copyable)} 条会话到「{self.target_name}」")
+        if self.do_persona and self.persona_add:
+            out.append(f"补齐 {len(self.persona_add)} 个人格文件到「{self.target_name}」")
         if self.do_memory:
             out.append(f"合并长期记忆到「{self.target_name}」")
         out.append(f"把登录身份写成「{self.target_name}」")
@@ -85,6 +194,7 @@ class SwitchReport:
     auth_backup: Path | None = None
     auth_written: bool = False
     copy_report: copysession.CopyReport | None = None
+    persona_report: PersonaReport | None = None
     memory_report: memorymerge.MergeReport | None = None
     restarted: bool = False
     error: str = ""
@@ -96,6 +206,8 @@ class SwitchReport:
         parts = [f"已切换到「{self.target_name}」"]
         if self.copy_report is not None and self.copy_report.copied:
             parts.append(f"复制 {len(self.copy_report.copied)} 条会话")
+        if self.persona_report is not None and self.persona_report.changed:
+            parts.append(f"补齐 {len(self.persona_report.added)} 个人格文件")
         if self.memory_report is not None and self.memory_report.changed:
             parts.append("已合并长期记忆")
         if not self.restarted:
@@ -106,17 +218,20 @@ class SwitchReport:
 def plan_switch(
     target_uid: str,
     copy_cids: list[str] | None = None,
+    do_persona: bool = False,
     do_memory: bool = False,
     base: str | Path | None = None,
     restart: bool = True,
     copy_all: bool = False,
 ) -> SwitchPlan:
-    """算出一份切换计划。**只读**（记忆合并只做 dry-run 预览）。
+    """算出一份切换计划。**只读**（人格与记忆合并只做 dry-run 预览）。
 
     `copy_cids` 非空 = 复制这些会话；`copy_all=True` = 复制源账号全部会话；
     两者都不给 = 不复制。
     """
-    plan = SwitchPlan(target_uid=target_uid, restart=restart, do_memory=do_memory)
+    plan = SwitchPlan(
+        target_uid=target_uid, restart=restart, do_persona=do_persona, do_memory=do_memory
+    )
     labels = accounts.AccountLabels.load(base)
     plan.target_name = labels.label(target_uid) if target_uid else ""
     plan.current_uid = authfile.current_uid(base) or labels.primary_uid
@@ -152,6 +267,13 @@ def plan_switch(
         if plan.copy_plan.same_account:
             plan.copy_plan = None
 
+    if do_persona:
+        plan.persona_add, plan.persona_conflict = preview_persona(
+            plan.current_uid, target_uid, base
+        )
+        if not plan.current_uid:
+            plan.warnings.append("未识别当前登录账号，无法预览人格文件补齐")
+
     if do_memory:
         plan.memory_preview = memorymerge.merge(
             plan.current_uid, target_uid, base=base, dry_run=True
@@ -184,9 +306,10 @@ def execute_switch(
     # 原先只报「正在关闭 WorkBuddy…」，用户既不知道后面还有几件事，也不知道
     # 卡在了哪一件。步数按这份计划实际会做的事算，不写死 —— 不复制会话时
     # 报「3/7」而实际只有 6 步，比不报还糟。
-    # 步数 = 固定四步（采集凭据 / 备份认证 / 关客户端 / 写身份）+ 可选三步
+    # 步数 = 固定四步（采集凭据 / 备份认证 / 关客户端 / 写身份）+ 可选四步
     total = 4 + (1 if plan.restart else 0)
     total += 1 if (plan.copy_plan is not None and plan.copy_plan.copyable) else 0
+    total += 1 if (plan.do_persona and plan.persona_add) else 0
     total += 1 if plan.do_memory else 0
     step_no = 0
 
@@ -261,7 +384,18 @@ def execute_switch(
             if not report.copy_report.copied and plan.copy_plan.copyable:
                 report.warnings.append("没有会话被实际复制，其余步骤照常执行")
 
-        # ---- 5. 合并长期记忆（失败只警告）
+        # ---- 5. 补齐人格文件（只补缺失，失败只警告）
+        if plan.do_persona and plan.persona_add:
+            say(f"补齐 {len(plan.persona_add)} 个人格文件…")
+            try:
+                report.persona_report = execute_persona(
+                    plan.current_uid, plan.target_uid, base
+                )
+                report.warnings.extend(report.persona_report.warnings)
+            except (OSError, ValueError) as exc:
+                report.warnings.append(f"人格文件补齐失败（已跳过）：{exc}")
+
+        # ---- 6. 合并长期记忆（失败只警告）
         if plan.do_memory:
             say("合并长期记忆…")
             try:
@@ -272,7 +406,7 @@ def execute_switch(
             except (OSError, ValueError) as exc:
                 report.warnings.append(f"记忆合并失败（已跳过）：{exc}")
 
-        # ---- 6. 写认证文件
+        # ---- 7. 写认证文件
         say("写入登录身份…")
         existing = authfile.read_root(base)
         doc = authfile.build_document(
@@ -292,7 +426,7 @@ def execute_switch(
         except OSError:
             pass
     finally:
-        # ---- 7. 无论成败都尝试拉起客户端：用户不能因为我们出错而失去客户端
+        # ---- 8. 无论成败都尝试拉起客户端：用户不能因为我们出错而失去客户端
         if plan.restart:
             say("重新启动 WorkBuddy…")
             report.restarted = closeflow.restart(outcome.exe_path)

@@ -69,6 +69,11 @@ _COLUMNS = ["积分", "会话", "最近使用"]
 # 逻辑与偏好存储（uistate.load_share_data）都保留，改回 True 即恢复显示。
 _SHOW_SHARE_OPTION = False
 
+# 「本机账号对齐」入口收起 —— 它的能力已并入「切换账号」向导的
+# 「补齐人格文件」一项（会话复制、长期记忆合并本就在切换流程里）。
+# 逻辑、模块与 align_requested 信号接线全部保留，改回 True 即恢复入口。
+_SHOW_ALIGN_OPTION = False
+
 AVATAR_SIZE = 40
 # 卡片高度按视口自适应：上限 282 保证卡内三段不空，下限 256 恰好等于卡片内容的
 # 最小高度（实测 minimumSizeHint 255，再低按钮就会被裁）。以前写死 400，
@@ -361,19 +366,22 @@ class AccountsPage(HeadedPage):
         self.btn_more = QToolButton()
         self.btn_more.setObjectName("IconButtonGhost")
         self.btn_more.setIcon(icons.glyph_icon("more", TEXT_SECONDARY, 16))
-        self.btn_more.setToolTip("改名 / 打开数据目录 / 对齐")
+        self.btn_more.setToolTip("改名 / 打开数据目录")
         self.btn_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_more.setFixedSize(34, 34)
         menu = QMenu(self)
         menu.addAction("修改账号名…").triggered.connect(self.rename_requested.emit)
         menu.addAction("打开数据目录").triggered.connect(self.open_dir_requested.emit)
-        menu.addSeparator()
-        menu.addAction("本机账号对齐…").triggered.connect(self.align_requested.emit)
+        self._sep_align = menu.addSeparator()
+        self._act_align = menu.addAction("本机账号对齐…")
+        self._act_align.triggered.connect(self.align_requested.emit)
         self._sep_share = menu.addSeparator()
         self._act_share = menu.addAction("让所有账号共用同一份数据")
         self._act_share.setCheckable(True)
         self._act_share.toggled.connect(self._on_share_toggled)
         # 收起时连同上面的分隔线一起藏：只藏一项会留一条悬空横线
+        for item in (self._sep_align, self._act_align):
+            item.setVisible(_SHOW_ALIGN_OPTION)
         for item in (self._sep_share, self._act_share):
             item.setVisible(_SHOW_SHARE_OPTION)
         self.btn_more.setMenu(menu)

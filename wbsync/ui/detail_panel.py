@@ -270,6 +270,23 @@ class DetailPanel(QWidget):
                 )
         else:
             self.callout.setVisible(False)
+            if record.space_dangling:
+                # 用户是在「未在侧边栏」档里点开这一条的 —— 得告诉他为什么看不到
+                self.callout.setVisible(True)
+                self.lbl_callout_head.setText("空间已丢失")
+                self.lbl_callout_sum.setText("会话指向的工作空间在本机不存在")
+                self.lbl_callout_body.setText(
+                    "多半是跨机导入时把源机的 space_id 一起带了过来，本机没有那行空间，"
+                    "客户端挂不上分组就不显示。正文与元数据都在，可以先导出留档。"
+                )
+            elif record.ignored_import:
+                self.callout.setVisible(True)
+                self.lbl_callout_head.setText("客户端没收录它")
+                self.lbl_callout_sum.setText("导入后客户端重写过侧边栏快照，却没把这条写进去")
+                self.lbl_callout_body.setText(
+                    "正文与元数据都在，只是客户端不展示（常见原因是工作目录是临时时间戳目录）。"
+                    "可以先导出留档，或在客户端里重新打开一次让它被收录。"
+                )
 
     def _fill_account(self, record: SessionRecord) -> None:
         uid = record.user_id or ""
@@ -310,6 +327,13 @@ def _state_of(record: SessionRecord) -> tuple[str, str]:
         return ("已删除 · 可恢复" if record.has_body else "已删除 · 无正文"), "PillBad"
     if not record.has_body:
         return "缺正文", "PillBad"
+    if record.space_dangling:
+        # 跨机导入带过来的旧 space_id：正文与云端映射都在，但客户端挂不上分组，
+        # 标成「正常」等于骗人（2026-11-14 实测：这批多半不显示）
+        return "空间悬空", "PillWarn"
+    if record.ignored_import:
+        # 导入后客户端重写过侧边栏却没收它 —— 客户端就是不认，别显示「正常」
+        return "未纳入侧栏", "PillWarn"
     if not record.has_cloud_mapping:
         return "未注册云端", "PillWarn"
     return "正常", "PillOk"
