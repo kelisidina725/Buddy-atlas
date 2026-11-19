@@ -187,16 +187,27 @@ class UpdateDialog(QDialog):
         self.notes.setPlainText(info.notes[:_NOTES_LIMIT].strip() or "这个版本没有写发布说明。")
         self.notes.setVisible(True)
 
+        # API 撞限额时降级读的是 Atom feed，没有附件直链，无法在程序内下载。
+        # 说清来源与原因，并把下载入口改成打开 Release 页面，避免按钮误导。
+        fallback_hint = (
+            "版本信息来自备用来源（GitHub 接口暂时不可用），请在 Release 页面下载。"
+            if info.from_fallback else ""
+        )
+
         local = updater.parse_version(__version__) or (0, 0, 0)
         if updater.is_newer(info.version, local):
             label = info.version and ".".join(str(x) for x in info.version)
             self.lbl_state.setText(f"发现新版本 v{label or info.tag}")
             self.btn_download.setVisible(True)
             self.btn_download.setEnabled(True)
-            self.btn_download.setText(
-                f"下载新版（{updater.format_size(info.asset_size)}）"
-                if info.asset_size else "下载新版"
-            )
+            if info.from_fallback:
+                self.btn_download.setText("前往 Release 页面下载")
+                self.lbl_detail.setText(fallback_hint)
+            else:
+                self.btn_download.setText(
+                    f"下载新版（{updater.format_size(info.asset_size)}）"
+                    if info.asset_size else "下载新版"
+                )
         elif info.version is None:
             self.lbl_state.setText(f"最新版本：{info.tag}")
             self.lbl_detail.setText("这个标签不是数字版本号，无法自动比较，可以到 Release 页面确认。")

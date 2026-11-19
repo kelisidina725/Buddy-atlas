@@ -200,6 +200,25 @@ def _run_selftest() -> int:
         _urlreq.Request(_updater.LATEST_API)
         lines.append("updater: 检查更新链路就绪（未发起请求）")
 
+        # Atom 降级链路：API 撞 403 时改读 releases.atom。用一段最小 XML
+        # 离线验证 xml.etree + 解析逻辑在打包产物里可用 —— 不联网，只解析。
+        _atom_xml = (
+            '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+            '<id>tag:github.com,2008:Repository/1/v1.2.3</id>'
+            '<title>v1.2.3</title>'
+            '<link rel="alternate" type="text/html" '
+            'href="https://github.com/x/y/releases/tag/v1.2.3"/>'
+            '<content type="html">&lt;p&gt;发布说明&lt;/p&gt;</content>'
+            '<updated>2026-01-01T00:00:00Z</updated>'
+            '</entry></feed>'
+        ).encode()
+        _atom_info = _updater._parse_atom(_atom_xml)
+        if (_atom_info.tag != "v1.2.3" or _atom_info.version != (1, 2, 3)
+                or _atom_info.source != "atom" or _atom_info.has_asset
+                or "发布说明" not in _atom_info.notes):
+            raise AssertionError(f"Atom 降级解析异常：{_atom_info}")
+        lines.append("updater: Atom 降级解析就绪（离线探针，未发起请求）")
+
         # 本机账号对齐（并集）与 settings.json 行为开关
         from wbsync import align as _align
         from wbsync import config_items as _ci

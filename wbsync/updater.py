@@ -5,6 +5,14 @@
 只有用户点开「检查更新」才调用 fetch_latest，只读 GitHub 的 Release
 元数据；下载要用户自己选保存位置，不自动安装，也不发送本机数据。
 
+两个只读数据源：
+  - api.github.com 的 releases/latest：字段全、带附件大小与 SHA256，优先用；
+    但未认证请求按出口 IP 限额 60 次/小时，共享代理（Clash 等）的出口
+    很容易撞满 → HTTP 403。
+  - github.com 的 releases.atom：网页 feed，不占 API 配额；API 报错时
+    降级读它，拿得到版本号与发布说明，但没有附件元数据。
+下载链接在两个数据源里都是 GitHub 官方地址，只写用户自己选的位置。
+
 打包配置 wbsync.spec 原先为了「纯离线」排掉了 urllib.request、http、
 email 和 libssl/libcrypto 两个 DLL。现在要放行它们，否则源码里能跑、
 打包出的 exe 会在点开检查更新那一刻 ImportError。
@@ -18,14 +26,17 @@ import re
 import ssl
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO = "kelisidina725/Buddy-atlas"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+ATOM_FEED = f"https://github.com/{REPO}/releases.atom"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 _USER_AGENT = "Buddy-atlas-update-check"
 _CHUNK = 64 * 1024
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 
 class UpdateError(Exception):
@@ -44,10 +55,17 @@ class ReleaseInfo:
     asset_url: str
     asset_size: int
     asset_digest: str
+    # "api" = 来自 releases/latest，字段齐全；"atom" = API 失败后降级读
+    # releases.atom 的兜底结果，没有附件元数据，无法程序内下载。
+    source: str = "api"
 
     @property
     def has_asset(self) -> bool:
         return bool(self.asset_url)
+
+    @property
+    def from_fallback(self) -> bool:
+        return self.source == "atom"
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
@@ -108,8 +126,8 @@ def _urlopen(url: str, timeout: float):
             raise first from None
 
 
-def fetch_latest(timeout: float = 10.0) -> ReleaseInfo:
-    """读取最新 Release 的元数据。只查询，不下载任何东西。"""
+def _fetch_latest_api(timeout: float) -> ReleaseInfo:
+    """从 releases/latest 读取。字段最全，但 403 限额时会抛 UpdateError。"""
     try:
         with _urlopen(LATEST_API, timeout) as resp:
             data = json.load(resp)
@@ -148,7 +166,99 @@ def fetch_latest(timeout: float = 10.0) -> ReleaseInfo:
         asset_url=str(exe.get("browser_download_url") or ""),
         asset_size=int(exe.get("size") or 0),
         asset_digest=str(exe.get("digest") or ""),
+        source="api",
     )
+
+
+def _notes_to_text(html: str) -> str:
+    """把 Atom 里 HTML 转义过的发布说明压成界面能直接显示的纯文本。
+
+    Atom 的 <content type="html"> 实体解码后是一段 HTML。这里不引入 html
+    模块（spec 的排除清单里有它），用最小实现去掉常见块级/行内标签，
+    保留换行和列表层次即可 —— 只用于 QTextBrowser 展示，不解析语义。
+    """
+    text = html or ""
+    # 块级标签与 <br> 转成换行，<li> 前补一个短横线
+    text = re.sub(r"(?is)<li[^>]*>", "\n- ", text)
+    text = re.sub(r"(?is)<br\s*/?>|</(?:p|div|h[1-6]|ul|ol|pre|blockquote)>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", "", text)  # 去掉剩余标签
+    # html.unescape 不在可用清单里，手工还原常见实体
+    for ent, ch in (
+        ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"),
+        ("&quot;", '"'), ("&#39;", "'"), ("&amp;", "&"),
+    ):
+        text = text.replace(ent, ch)
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln.strip()).strip()
+
+
+def _parse_atom(raw: bytes) -> ReleaseInfo:
+    """把 releases.atom 的 XML 解析成 ReleaseInfo。纯函数，便于离线自检。"""
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise UpdateError(f"备用来源返回的内容读不懂：{exc}") from None
+
+    entry = root.find(f"{_ATOM_NS}entry")
+    if entry is None:
+        raise UpdateError("这个仓库还没有发布过 Release。")
+
+    def field(name: str) -> str:
+        node = entry.find(f"{_ATOM_NS}{name}")
+        return (node.text or "") if node is not None else ""
+
+    # 页面链接用 <link rel="alternate" type="text/html">，比自行拼更可靠
+    page_url = RELEASES_PAGE
+    for link in entry.findall(f"{_ATOM_NS}link"):
+        if link.get("rel") == "alternate":
+            page_url = link.get("href") or page_url
+            break
+
+    # <id> 形如 tag:github.com,2008:Repository/<repo_id>/v1.2.3，取末段即 tag
+    raw_id = field("id")
+    tag = raw_id.rsplit("/", 1)[-1] if "/" in raw_id else ""
+    return ReleaseInfo(
+        tag=tag,
+        version=parse_version(tag),
+        title=field("title") or tag or "最新版本",
+        page_url=page_url,
+        notes=_notes_to_text(field("content")),
+        published_at=field("updated"),
+        asset_name="Buddy-atlas.exe",
+        asset_url="",  # Atom 不提供附件直链，交给界面引导到 Release 页面
+        asset_size=0,
+        asset_digest="",
+        source="atom",
+    )
+
+
+def _fetch_latest_atom(timeout: float) -> ReleaseInfo:
+    """API 失败时的兜底数据源：读 github.com 的 releases.atom。
+
+    网页 feed 不占 api.github.com 的 60 次/小时配额，和 API 撞 403 的
+    共享出口也能读到。取不到附件元数据，只给出版本号 + 说明 + 页面链接，
+    由界面引导用户到 Release 页面手动下载。
+    """
+    try:
+        with _urlopen(ATOM_FEED, timeout) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise UpdateError(f"备用来源返回 HTTP {exc.code}。") from None
+    except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as exc:
+        raise UpdateError(f"连不上备用来源：{exc}") from None
+    return _parse_atom(raw)
+
+
+def fetch_latest(timeout: float = 10.0) -> ReleaseInfo:
+    """读取最新 Release 的元数据。只查询，不下载任何东西。
+
+    API 优先（字段齐全、可程序内下载）；一旦失败，自动降级读 releases.atom，
+    保证共享出口 IP 撞上 GitHub 403 时仍能查到版本。两条路都不通才报错。
+    """
+    try:
+        return _fetch_latest_api(timeout)
+    except UpdateError:
+        return _fetch_latest_atom(timeout)
 
 
 def sha256_of(path: Path) -> str:
