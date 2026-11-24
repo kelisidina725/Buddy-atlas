@@ -83,6 +83,20 @@ def load(conn: sqlite3.Connection) -> SpaceIndex | None:
     if not rows:
         return SpaceIndex()
 
+    # space_folders 才是「空间归哪个真实目录」的权威表。create_folder_path
+    # 有时是临时工作区目录（实测 A 的 Buddy-atlas 等），只按它建键会让按 cwd
+    # 反查失败，退到全局命中别的账号的同名空间。
+    folder_paths: dict[str, list[str]] = {}
+    if dbcopy.table_exists(conn, "space_folders"):
+        try:
+            for fr in conn.execute('SELECT space_id, path FROM "space_folders"'):
+                fd = dict(fr)
+                folder_paths.setdefault(str(fd.get("space_id") or ""), []).append(
+                    str(fd.get("path") or "")
+                )
+        except sqlite3.Error:
+            pass
+
     out = SpaceIndex()
     for r in rows:
         d = dict(r)
@@ -95,11 +109,15 @@ def load(conn: sqlite3.Connection) -> SpaceIndex | None:
         uid = str(d.get("user_id") or "")
         out.spaces.append(Space(id=sid, name=str(d.get("name") or ""), path=path, uid=uid))
         out.owner[sid] = uid
-        key = path_key(path)
-        if key:
-            out.by_path.setdefault(key, sid)
-            if uid:
-                out.by_uid_path.setdefault((uid, key), sid)
+        # 一个空间可以有多个目录键：space_folders 的真实目录 + create + primary，
+        # 缺一不可 —— 老客户端没有 space_folders 表时仍退回 create/primary。
+        keys = {path_key(path)}
+        keys.update(path_key(fp) for fp in folder_paths.get(sid, []))
+        for key in keys:
+            if key:
+                out.by_path.setdefault(key, sid)
+                if uid:
+                    out.by_uid_path.setdefault((uid, key), sid)
     return out
 
 
@@ -127,7 +145,9 @@ def localize(
             if hit:
                 return hit, REMAP
         hit = index.by_path.get(key)
-        if hit:
+        # 全局兜底不能跨账号：若无 uid 归属保证，宁可置 NULL 让客户端按 cwd
+        # 兜底，也不能挂到别的账号的空间上（那会让会话在目标账号里消失）。
+        if hit and (not uid or index.owner.get(hit, "") in ("", uid)):
             return hit, REMAP
     if not raw:
         return None, KEPT
