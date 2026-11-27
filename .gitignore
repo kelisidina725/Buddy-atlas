@@ -44,6 +44,13 @@ _tools/
 # 重新拉起工程时留下的整份嵌套副本（自带 .git）
 /Buddy-atlas/
 
+# ===== 本机一次性维护脚本 =====
+# 存量数据修复用（跨账号空间引用、重复会话），依赖本机会话库形态，
+# 不属于公开产物，按内部工具口径不入库。
+fix_space_refs.py
+fix_duplicates.py
+run_fix_duplicates.bat
+
 # ===== 编辑器与系统 =====
 .vscode/
 .idea/
