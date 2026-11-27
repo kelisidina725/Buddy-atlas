@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import dbcopy, guard, paths, spacelink
-from .fingerprint import lf_size
+from .fingerprint import fingerprint_of_file, lf_size
 
 LEDGER_NAME = "wbsync-copies.json"
 LEDGER_VERSION = 1
@@ -65,6 +65,11 @@ _OVERRIDE_NOTE = {
 }
 
 _CLAW_DIR = "claw"
+
+# 目标账号判重的读盘门槛：小于这个字节数（LF 口径）的会话不读正文比摘要 ——
+# 空会话 / 只有 meta 一两行的会话尺寸必然撞车，比摘要得不偿失。
+# 与 align.MIN_DEDUP_BYTES 同值，两处口径保持一致。
+_DEDUP_MIN_BYTES = 256
 
 
 # ---------------------------------------------------------------- 数据结构
@@ -148,6 +153,11 @@ class CopyPlan:
         return [i for i in self.items if i.duplicate_of]
 
     @property
+    def same_content(self) -> list[CopyItem]:
+        """目标账号里已有同内容副本（账本没记，靠正文摘要认出来的）。"""
+        return [i for i in self.items if i.same_content_of]
+
+    @property
     def body_bytes(self) -> int:
         return sum(i.body_bytes for i in self.copyable)
 
@@ -163,6 +173,8 @@ class CopyPlan:
         parts = [f"可复制 {len(self.copyable)} 条"]
         if self.duplicates:
             parts.append(f"已复制过 {len(self.duplicates)} 条")
+        if self.same_content:
+            parts.append(f"已有相同内容 {len(self.same_content)} 条")
         if self.blocked:
             parts.append(f"不可复制 {len(self.blocked)} 条")
         if self.body_bytes:
@@ -254,7 +266,9 @@ def lineage(ledger: dict[str, dict]) -> dict[str, str]:
         if not isinstance(entry, dict):
             continue
         new_cid = str(entry.get("new_cid") or "")
-        source_cid = key.rsplit("|", 1)[0]
+        # 新账本记着 origin_cid（复制时算好的家族根），一步就能跳到根；
+        # 老账本没有这一列，退回按 key 里的直接来源，链路仍然连得上。
+        source_cid = str(entry.get("origin_cid") or "") or key.rsplit("|", 1)[0]
         if new_cid and source_cid:
             out[new_cid] = source_cid
     return out
@@ -451,6 +465,105 @@ def _target_cids(conn: sqlite3.Connection, uid: str) -> dict[str, bool]:
     return {str(r[0]): r[1] is None for r in rows}
 
 
+def _mark_target_duplicates(
+    plan: CopyPlan,
+    ledger: dict[str, dict],
+    bodies: dict[str, list[Path]],
+    target_rows: list[dict],
+) -> int:
+    """把「目标账号里其实已经有这一段对话」的项标成 `same_content_of`。
+
+    ## 为什么要做
+
+    账本按 `(源 cid, 目标账号)` 记账，而每次复制都会换新 cid。A→B→A 往返一次，
+    同一段对话就在库里有了两个互不相识的 cid，账本认为「这条没复制过」，于是再来
+    一份 —— 用户看到的就是「复制完的会话都有重复的一份」，且每往返一次翻一倍。
+
+    ## 两道判据
+
+    1. **血缘**（零读盘，只用来锁候选）：账本把 `A.cid1 → B.cid2` 记下来了，
+       B.cid2 就是 A.cid1 的副本；多跳由 `canonical_cid` 走到家族根，往返链
+       （A→B→A）一样认得出来，直接给出该比对的那一条。
+    2. **内容**（最终判定，必须比）：副本是 cid 等长替换，LF 字节数必然相同，
+       所以先按尺寸撞车预筛，再比归一化全文摘要 —— `fingerprint_of_file(p, cid)`
+       会把本会话自己的 cid 换成占位符，两份副本摘要因此相等。
+
+    ★ 血缘只锁候选、不单独定罪：目标里可能是**同一份会话的旧版本**（用户后来在
+      另一个账号里继续聊过），内容并不相同。这种情形该由对齐去「追加缺的行」，
+      标成「已有相同内容」会把追加吞掉，目标账号就永远停在旧版本。
+
+    ## 边界
+
+    - 只看目标账号**未删除**的会话：已删除的那条用户切过去也看不到，算「已有」
+      等于没复制到位（与 `alive_session_cids` 同一口径）。
+    - 只做标记、不改计划：`same_content_of` 的项照常列出、可勾选，只是默认不勾
+      （`CopyItem.recommended`）—— 用户可能确实想要两份。
+    - 不覆盖更确定的判定：已被账本记成 `duplicate_of` 的项直接跳过。
+    """
+    live = [r for r in target_rows if r.get("deleted_at") is None]
+    if not live or not plan.items:
+        return 0
+
+    produced = lineage(ledger)
+    by_canon: dict[str, str] = {}
+    for row in live:
+        cid = str(row.get("id") or "")
+        if cid:
+            by_canon.setdefault(canonical_cid(cid, produced), cid)
+
+    # 尺寸 -> 目标账号里的 cid：账本没记的副本（客户端自身 / 换机搬运造的那种）
+    # 只能靠尺寸撞车找出来，只有撞车的项才值得读正文
+    by_size: dict[int, list[str]] = {}
+    for row in live:
+        cid = str(row.get("id") or "")
+        body = (bodies.get(cid) or [None])[0]
+        if body is None:
+            continue
+        size = lf_size(body)
+        if size is None or size < _DEDUP_MIN_BYTES:
+            continue
+        by_size.setdefault(size, []).append(cid)
+
+    cache: dict[str, tuple[str, int] | None] = {}
+
+    def digest_of(cid: str) -> tuple[str, int] | None:
+        if cid in cache:
+            return cache[cid]
+        got: tuple[str, int] | None = None
+        for p in bodies.get(cid, []):
+            fp = fingerprint_of_file(p, cid)
+            if fp is not None:
+                got = (fp.digest, fp.line_count)
+                break
+        cache[cid] = got
+        return got
+
+    marked = 0
+    for item in plan.items:
+        if item.block_reason or item.duplicate_of or item.deleted:
+            continue
+        if item.body_bytes < _DEDUP_MIN_BYTES:
+            continue
+        cands: list[str] = []
+        twin = by_canon.get(canonical_cid(item.cid, produced))
+        if twin and twin != item.cid:
+            cands.append(twin)
+        for tc in by_size.get(item.body_bytes, []):
+            if tc != item.cid and tc not in cands:
+                cands.append(tc)
+        if not cands:
+            continue
+        mine = digest_of(item.cid)
+        if mine is None:
+            continue
+        for tc in cands:
+            if digest_of(tc) == mine:
+                item.same_content_of = tc
+                marked += 1
+                break
+    return marked
+
+
 def plan_copy(
     target_uid: str,
     source_uid: str = "",
@@ -491,6 +604,9 @@ def plan_copy(
     with dbcopy.readonly_db_copy(plan.db_path) as conn:
         rows = _read_rows(conn, source_uid)
         alive = _target_cids(conn, target_uid)
+        # 目标账号的行也要拿来判重：账本只认本工具复制过的副本，客户端自身 /
+        # 换机搬运造出来的同内容副本账本里一条都没有。
+        target_rows = _read_rows(conn, target_uid)
 
     for row in rows:
         cid = str(row.get("id") or "")
@@ -541,6 +657,8 @@ def plan_copy(
                 item.duplicate_of = new_cid
 
         plan.items.append(item)
+
+    _mark_target_duplicates(plan, ledger, bodies, target_rows)
 
     if wanted:
         missing = wanted - {i.cid for i in plan.items}
@@ -744,6 +862,9 @@ def execute_copy(
         usable.append((item, new_cid, dst, size))
 
     ledger = load_ledger(base)
+    # 家族根：写进账本后，下一轮（哪怕是 A→B→A 往返）一步就能认出「这条已有」，
+    # 不用沿着中间跳数一路回溯。
+    produced = lineage(ledger)
     written: list[tuple[str, str]] = []
     try:
         with guard.DbEditSession(db_path) as conn:
@@ -756,13 +877,16 @@ def execute_copy(
                     continue
                 _insert_row(conn, cols, values, new_cid, plan.target_uid, now)
                 written.append((item.cid, new_cid))
+                origin = canonical_cid(item.cid, produced)
                 ledger[ledger_key(item.cid, plan.target_uid)] = {
                     "new_cid": new_cid,
                     "source_uid": plan.source_uid,
                     "target_uid": plan.target_uid,
+                    "origin_cid": origin,
                     "title": item.title,
                     "at": now,
                 }
+                produced[new_cid] = origin
                 report.copied.append((item.cid, new_cid))
                 report.body_bytes += max(0, size)
     except Exception as exc:  # noqa: BLE001 - 交给界面展示
