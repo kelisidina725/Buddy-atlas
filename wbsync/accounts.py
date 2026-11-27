@@ -362,6 +362,95 @@ def detect_primary_uid(
     return ""
 
 
+# ---------------------------------------------------------------- 名单并集
+# 来源标签只用来解释「这个 uid 是怎么知道的」，不参与「当前登录是谁」的判定
+# （那是 `detect_primary_uid` 的职责，判据严得多）。
+SRC_DB = "db"        # 会话库 sessions 表里出现过
+SRC_AUTH = "auth"    # 认证文件里此刻登录着的
+SRC_DIR = "dir"      # 本机有 user-<uid>-personal/ 目录
+SRC_VAULT = "vault"  # 本工具凭据库里有
+
+PERSONA_PREFIX = "user-"
+PERSONA_SUFFIX = "-personal"
+
+
+def persona_uids(base: str | os.PathLike[str] | None = None) -> list[str]:
+    """本机 `user-<uid>-personal/` 目录名里的 uid。
+
+    只有真登录过、落过盘的账号才有这个目录；会话被清空的账号仍留着它，
+    所以它是「这个账号在这台机器上存在过」的强证据 —— 比会话库更耐久。
+    """
+    root = paths.session_data_dir(base)
+    if not root.is_dir():
+        return []
+    out: list[str] = []
+    try:
+        for entry in root.iterdir():
+            name = entry.name
+            if not (name.startswith(PERSONA_PREFIX) and name.endswith(PERSONA_SUFFIX)):
+                continue
+            if not entry.is_dir():
+                continue
+            uid = name[len(PERSONA_PREFIX) : -len(PERSONA_SUFFIX)]
+            if uid:
+                out.append(uid)
+    except OSError:
+        return out
+    return out
+
+
+def local_uids(
+    base: str | os.PathLike[str] | None = None,
+    extra: Iterable[str] = (),
+) -> dict[str, frozenset[str]]:
+    """本机「知道」的全部账号：`uid -> 来源集合`，按可信度排序。
+
+    ★ 名单来源与「当前登录是谁」是两件事，谁也不能替代谁：
+      - 会话库的 `user_id` 只覆盖**产生过会话**的账号。外部软件刚切过来的
+        账号在本机一条记录都没有，但它确实该出现在列表里 —— 否则用户连
+        「切回去」的入口都没有，只能看着旧账号发呆。
+      - 反过来，认证文件只能说明此刻是谁，不能单独拿来凑历史名单。
+
+    四个来源按可信度递减排列（调用方按需取用；`build_accounts` 仍按
+    「主账号 → 会话数」排序，不依赖这个顺序）：
+      会话库（extra，调用方传入） > 认证文件 > persona 目录 > 凭据库。
+
+    `extra` 由调用方给（盘点结果的 `all_uids`），本函数不碰数据库 ——
+    盘点是异步的，这里再开一次库只会拖慢界面。
+    """
+    sources: dict[str, set[str]] = {}
+
+    def add(uid: object, tag: str) -> None:
+        text = str(uid or "").strip()
+        if text:
+            sources.setdefault(text, set()).add(tag)
+
+    for uid in extra:
+        add(uid, SRC_DB)
+
+    try:
+        from . import authfile
+
+        rec = authfile.current_record(base)
+        if rec:
+            add(rec.get("uid"), SRC_AUTH)
+    except (OSError, ValueError):
+        pass  # 认证文件读不动不影响其余来源
+
+    for uid in persona_uids(base):
+        add(uid, SRC_DIR)
+
+    try:
+        from . import vault
+
+        for uid in vault.Vault.load(base).uids():
+            add(uid, SRC_VAULT)
+    except (OSError, ValueError):
+        pass
+
+    return {uid: frozenset(tags) for uid, tags in sources.items()}
+
+
 @dataclass(frozen=True)
 class AccountInfo:
     """一个账号的展示信息，供界面下拉框 / 抽屉使用。"""
@@ -379,6 +468,10 @@ class AccountInfo:
     # 这三个数决定用户要不要切过去，而它们在任何别处都看不到。
     body_bytes: int = 0
     last_used: int = 0
+    # 本机是否留下过这个账号的数据（会话 / persona 目录 / 凭据库任一处）。
+    # False = 只从认证文件知道的账号：刚被外部软件切过来，还没登录过。
+    # 界面必须把这两种「0 条」分开说，否则用户会以为盘点漏了它。
+    has_local_data: bool = True
 
     @property
     def label(self) -> str:
@@ -407,16 +500,21 @@ def build_accounts(
     sidebar_counts: dict[str, int] | None = None,
     body_bytes: dict[str, int] | None = None,
     last_used: dict[str, int] | None = None,
+    no_local_data: set[str] | None = None,
 ) -> list[AccountInfo]:
     """按「主账号优先、其次按会话数降序」排好序的账号列表。
 
     `body_bytes` / `last_used` 只有抽屉会用；缺省为 0 时抽屉不渲染那一段，
     而不是显示「0 B · 未知」—— 拿不到就别假装有。
+
+    `no_local_data` 是本机没有留下任何数据的 uid（只从认证文件知道的），
+    标出来让界面说「本机暂无数据」而不是「0 条 / 待盘点」。
     """
     counts = session_counts or {}
     side = sidebar_counts or {}
     sizes = body_bytes or {}
     used = last_used or {}
+    missing = no_local_data or set()
     infos = [
         AccountInfo(
             uid=u,
@@ -429,6 +527,7 @@ def build_accounts(
             edition=labels.edition_of(u),
             body_bytes=int(sizes.get(u, 0) or 0),
             last_used=int(used.get(u, 0) or 0),
+            has_local_data=u not in missing,
         )
         for u in uids
         if u

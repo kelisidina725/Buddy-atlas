@@ -237,7 +237,7 @@ class AccountCard(QFrame):
     def _stat(self, col: int, text: str) -> None:
         lbl = self.stat_vals[col]
         lbl.setText(text or "—")
-        muted = text in ("", "—", "待盘点")
+        muted = text in ("", "—", "待盘点", "本机无数据")
         lbl.setObjectName("StatValMuted" if muted else "StatVal")
         lbl.style().unpolish(lbl)
         lbl.style().polish(lbl)
@@ -253,13 +253,20 @@ class AccountCard(QFrame):
 
         credit = credits.credit_for(info.uid)
         counted = session_count is not None
-        if counted:
+        # 「本机没有它的数据」和「还没盘点」是两件事：
+        # 前者等再久也不会变出条数，写「待盘点」等于让用户白等一轮。
+        no_data = not info.has_local_data
+        if no_data:
+            count = "—"
+        elif counted:
             count = f"{session_count} 条"
         elif unscanned:
             count = "—"           # 没盘过就没有可信条数，不显示陈旧数字
         else:
             count = f"{info.visible_count} 条" if info.visible_count else "—"
-        if unscanned and not counted:
+        if no_data:
+            when = "本机无数据"
+        elif unscanned and not counted:
             when = "待盘点"
         else:
             when = "正在使用" if login else (human_ago(info.last_used) or "—")
@@ -276,7 +283,9 @@ class AccountCard(QFrame):
                     if info.nickname and info.nickname != label else "",
                     f"可用积分 {credit.value_text}（{credit.time_text}观察）"
                     if credit else "可用积分：本机没有积分快照",
-                    "尚未盘点，点卡片查看时会按此账号只读盘点一次" if unscanned and not counted else "",
+                    "本机没有这个账号的数据（会话库、账号目录、凭据库都没有）；"
+                    "用客户端登录一次，再重新盘点即可" if no_data else "",
+                    "尚未盘点，点卡片查看时会按此账号只读盘点一次" if unscanned and not counted and not no_data else "",
                 ) if b
             )
         )

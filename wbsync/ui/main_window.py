@@ -81,6 +81,7 @@ from .. import restore as restore_mod
 from .. import switch as switch_mod
 from .. import cwd_map, uistate
 from .accounts_page import AccountsPage
+from .auth_watch import AuthWatcher
 from .backup_page import BackupPage
 from .config_dialog import ConfigPage
 from .detail_panel import DetailPanel
@@ -753,6 +754,12 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh()
 
+        # 外部软件改登录态（写认证文件）后当场知道，见 auth_watch 的模块说明。
+        # 本工具只负责「发现 + 提示」：整份会话清单要不要换，交给用户点一下。
+        self._login_notice: QMessageBox | None = None
+        self._auth_watch = AuthWatcher(self)
+        self._auth_watch.switched.connect(self._on_login_switched)
+
     # ============================================================ 布局
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1303,6 +1310,79 @@ class MainWindow(QMainWindow):
             return self._account_login_uid()
         return uid
 
+    # ------------------------------------------------ 外部切换登录（文件监听）
+    def _on_login_switched(self, _old_uid: str, new_uid: str) -> None:
+        """外部软件切换了登录账号 —— 刷新身份与凭据，重盘与否交给用户。
+
+        ★ 不自动重盘：盘点会整份换掉会话清单与所有统计，用户可能正看着某一页。
+          无声换掉他正在看的东西，比多一次点击更打扰人。
+        ★ 顺手采集新账号的凭据：认证文件只留当前这一个账号，这一刻不收，
+          以后想从本工具切回它就得重新登录（与启动时那次采集同一个理由）。
+        """
+        self._labels = accounts_mod.AccountLabels.load()
+        try:
+            from .. import vault as vault_mod
+
+            vault_mod.Vault.load().capture_current()
+        except (OSError, ValueError):
+            pass
+        self._update_account_card()
+        self._show_login_notice(new_uid)
+
+    def _show_login_notice(self, new_uid: str) -> None:
+        """提示「登录身份变了」，并给一个「按新账号重盘」的按钮。
+
+        `open()` 而不是 `exec()`：这是在别处发生的切换，本工具可能正在盘点或
+        导入，不该用嵌套事件循环把当前流程停住。窗口模态仍保留 —— 这条提示的
+        全部意义就是让人看见，非模态很容易被主窗口盖住。
+        """
+        # 首次盘点还没回来时无从判断「本机有没有这个账号」，先按可重盘处理
+        known = self._inv is None or any(a.uid == new_uid for a in self._accounts)
+        name = self._labels.nickname_of(new_uid) or self._labels.aliases.get(new_uid, "")
+        shown = name or f"账号 {accounts_mod.short_uid(new_uid)}"
+
+        if self._login_notice is not None:
+            # 连续切换只留最新一条：旧提示里的账号已经不是当前身份了
+            self._login_notice.close()
+            self._login_notice = None
+
+        box = QMessageBox(self)
+        box.setWindowTitle("登录账号已变更")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"检测到客户端登录已切换为「{shown}」。")
+        if known:
+            box.setInformativeText(
+                "本工具的盘点范围还停在原来的账号上，要按新账号重新盘点吗？"
+            )
+        else:
+            # 名单并集之后，新账号重盘就会出现（标「本机暂无数据」）；
+            # 它的会话要等客户端真的以它登录一次才落盘。
+            box.setInformativeText(
+                "本机还没有这个账号的数据。重新盘点会把账号加进列表并标为"
+                "「本机暂无数据」，用客户端打开它一次之后就能看到会话。"
+            )
+        rescan = box.addButton("重新盘点", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+
+        def _done(_result: int = 0) -> None:
+            self._login_notice = None
+            if box.clickedButton() is rescan:
+                self._rescan_login_account(new_uid)
+
+        box.finished.connect(_done)
+        self._login_notice = box
+        box.open()
+
+    def _rescan_login_account(self, uid: str) -> None:
+        """按外部切换后的新账号重盘。
+
+        不走 `_rescan_current`：那一条经过 `detect_primary_uid`，而它要求
+        `user-<uid>-personal/` 存在才认认证文件 —— 刚切过来的账号可能还没有这个
+        目录，于是它退回旧账号，盘完还是别人的数据。
+        """
+        self._current_uid = uid
+        self._refresh(uid=uid)
+
     def _toggle_account_drawer(self) -> None:
         """旧入口保留：v1.6.11 起账号是独立一页，点顶栏胶囊/侧栏「账号」都走这里。
 
@@ -1451,6 +1531,9 @@ class MainWindow(QMainWindow):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def _do_switch(self, plan) -> None:
+        # 认证文件是我们自己写的：登记目标身份，别让监听把它当成「外部切换」
+        # 再弹一次提示（切换结束本来就会重盘并给结果框）
+        self._auth_watch.expect(plan.target_uid)
         self._set_busy(True)
         self.overlay.start("正在切换账号…", "关闭客户端 → 搬数据 → 写入登录身份 → 重启")
         self._switcher = SwitchWorker(plan, self)
@@ -1465,6 +1548,9 @@ class MainWindow(QMainWindow):
         self.overlay.set_title(text)
 
     def _on_switch_failed(self, message: str) -> None:
+        # 没写成（或在写入前就中止了）：撤销「这次是我写的」的登记，
+        # 否则下一次真正的外部切换若正好切到同一个账号，提示会被静默吞掉
+        self._auth_watch.expect("")
         self._set_busy(False)
         self.overlay.stop()
         self._refresh_client_state()
@@ -1753,9 +1839,21 @@ class MainWindow(QMainWindow):
         inv = self._inv
         if inv is None:
             return
-        # 名单取库里出现过的全部账号（inv.all_uids 不受盘点范围影响），
-        # 否则只盘当前账号时别的账号会从下拉里消失，切不过去。
-        uids = list(inv.all_uids) or sorted({r.user_id for r in inv.records if r.user_id})
+        # 名单 = 本机「知道」的全部账号之并集，不再只取会话库里出现过的：
+        # 外部软件刚切过来的账号在本机一条会话都没有，但它必须能被看见 ——
+        # 否则用户连「切回去」的入口都没有，只能对着旧账号的列表发呆。
+        # 四个来源（会话库 / 认证文件 / persona 目录 / 凭据库）见 accounts.local_uids。
+        db_uids = inv.all_uids or tuple(
+            sorted({r.user_id for r in inv.records if r.user_id})
+        )
+        sources = accounts_mod.local_uids(extra=db_uids)
+        uids = list(sources)
+        # 只在认证文件里出现、别处都没有 → 本机确实没有它的数据。
+        # 这类账号要在界面上说「本机暂无数据」，不能和「还没盘点」混着报 0 条。
+        # （判定结果存进 AccountInfo.has_local_data，界面只认那一个字段。）
+        no_data = {
+            u for u, src in sources.items() if src <= {accounts_mod.SRC_AUTH}
+        }
         by_uid = inv.by_uid()
         counts = {u: len(by_uid.get(u, ())) for u in uids}
         # 下拉框的「X 条可见」必须和 chip / 副标题 / 底部用同一口径：
@@ -1781,13 +1879,21 @@ class MainWindow(QMainWindow):
                 default=0,
             )
         self._accounts = accounts_mod.build_accounts(
-            sorted(counts.keys()), self._labels, counts, side, sizes, used
+            sorted(counts.keys()),
+            self._labels,
+            counts,
+            side,
+            sizes,
+            used,
+            no_local_data=no_data,
         )
 
         self.cmb_account.blockSignals(True)
         self.cmb_account.clear()
         # 没盘过的范围不给条数：那数字得靠猜，猜出来的只会让人以为盘点错了
         pending = "（未盘点，仅浏览）"
+        # 本机压根没有它的数据：说「未盘点」会让人等一个不会来的结果
+        no_data_tag = "（本机暂无数据）"
         self.cmb_account.addItem(
             f"全部账号（{len(inv.visible)} 条可见）"
             if not self._scan_uid
@@ -1796,7 +1902,9 @@ class MainWindow(QMainWindow):
         )
         for a in self._accounts:
             tag = a.label
-            if self._needs_rescan(a.uid):
+            if not a.has_local_data:
+                tag += no_data_tag
+            elif self._needs_rescan(a.uid):
                 tag += pending
             elif a.sidebar_count:
                 tag += f"（{a.sidebar_count} 条可见）"
@@ -1839,6 +1947,17 @@ class MainWindow(QMainWindow):
     def _viewing_unscanned_account(self) -> bool:
         """下拉里选的是不是「本次没盘点过的账号」。"""
         return self._needs_rescan(self._current_uid)
+
+    def _viewing_no_data_account(self) -> bool:
+        """下拉里选的是不是「本机压根没有数据」的账号。
+
+        这类账号只会因为认证文件里登录着它才进名单（外部软件刚切过来）。
+        它和「没盘过」要分开说：没盘过是等一下就有，没数据是等多久都没有。
+        """
+        uid = self._current_uid
+        if not uid or uid == ALL_ACCOUNTS:
+            return False
+        return any(a.uid == uid and not a.has_local_data for a in self._accounts)
 
     def _rename_account(self) -> None:
         uid = self._current_uid
@@ -2052,8 +2171,11 @@ class MainWindow(QMainWindow):
         tail_note = "按对话 / 工作区分组，点组名可折叠"
         # 侧栏可以切到别的账号看数据，但盘点只做当前登录账号。
         # 那个账号没有数据时要说明原因，否则「共 0 条」看起来像盘点坏了。
-        if self._viewing_unscanned_account() and not scoped:
-            tail_note = "该账号本次未盘点：只读浏览已盘点数据，导出固定用当前登录账号"
+        if not scoped:
+            if self._viewing_no_data_account():
+                tail_note = "该账号在本机没有数据：先用客户端登录一次，再重新盘点"
+            elif self._viewing_unscanned_account():
+                tail_note = "该账号本次未盘点：只读浏览已盘点数据，导出固定用当前登录账号"
         if self.stack.currentIndex() == VIEW_TABLE:
             tail_note = "表格视图，双击一行看详情"
         if self._scope == SCOPE_DELETED and rows and all(r.has_body for r in rows):
