@@ -139,6 +139,9 @@ class CopyPlan:
     db_path: Path | None = None
     edge_db_path: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    # 计划范围是不是「用户逐条指定的」。True 时连重复项也照做 —— 勾了就是要复制；
+    # False（= 全部会话）时自动跳过目标账号已有的同内容会话。
+    explicit_items: bool = False
 
     @property
     def copyable(self) -> list[CopyItem]:
@@ -598,6 +601,7 @@ def plan_copy(
         return plan
 
     wanted = {c for c in (cids or []) if c}
+    plan.explicit_items = bool(wanted)
     bodies = _bodies_index(base)
     ledger = load_ledger(base)
 
@@ -791,6 +795,18 @@ def _register_edge(conn: sqlite3.Connection, new_cid: str, target_uid: str) -> b
     return True
 
 
+def copy_items(plan: CopyPlan) -> list[CopyItem]:
+    """真正要复制的项。
+
+    「复制全部会话」这类自动范围里，目标账号已有同内容的那条直接跳过 —— 否则每切
+    一次账号就多一份同名同内容的副本，也就是用户看到的「会话重复」。
+    用户逐条勾选的计划（`explicit_items`）不拦：勾了就是要复制，是他的决定。
+    """
+    if plan.explicit_items:
+        return plan.copyable
+    return [i for i in plan.copyable if not i.same_content_of]
+
+
 def execute_copy(
     plan: CopyPlan,
     base: str | os.PathLike[str] | None = None,
@@ -803,8 +819,13 @@ def execute_copy(
     每次都备份整库只是把同一份库复制 N 遍）。此时**调用方必须自己先备份**。
     """
     report = CopyReport()
-    items = plan.copyable
+    items = copy_items(plan)
     report.warnings.extend(plan.warnings)
+    skipped = len(plan.copyable) - len(items)
+    if skipped:
+        report.warnings.append(
+            f"跳过 {skipped} 条目标账号里已有同内容的会话（要强制复制，请在清单里逐条勾选）。"
+        )
     if not items:
         return report
 

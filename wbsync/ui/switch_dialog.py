@@ -506,6 +506,7 @@ class SwitchAccountDialog(QDialog):
         self._fill_sessions(plan, keep if reselect else None)
         self.lbl_copy_note.setText(
             f"源账号共 {len(plan.items)} 条会话，其中 {len(plan.copyable)} 条可复制"
+            + (f"，{len(plan.same_content)} 条已有相同内容" if plan.same_content else "")
             + (f"，{len(plan.duplicates)} 条之前已复制过" if plan.duplicates else "")
             + (f"，{len(plan.blocked)} 条不可复制" if plan.blocked else "")
             + "。"

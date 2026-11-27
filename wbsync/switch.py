@@ -362,8 +362,9 @@ def execute_switch(
 
     try:
         # ---- 4. 复制会话（有硬失败就中止，别让用户切过去发现"什么都没有"）
-        if plan.copy_plan is not None and plan.copy_plan.copyable:
-            say(f"复制 {len(plan.copy_plan.copyable)} 条会话…")
+        to_copy = copysession.copy_items(plan.copy_plan) if plan.copy_plan else []
+        if to_copy:
+            say(f"复制 {len(to_copy)} 条会话…")
             report.copy_report = copysession.execute_copy(
                 plan.copy_plan,
                 base=base,
